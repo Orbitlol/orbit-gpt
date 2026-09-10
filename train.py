@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     d = p.add_argument_group("data")
     d.add_argument(
         "--dataset",
-        default="shakespeare,orbit-chat:10",
+        default="orbit-chat:20",
         help="corpus spec: name[:repeat],... a local file, a folder, or a URL "
         f"(known: {list_datasets()})",
     )

@@ -56,7 +56,7 @@ change the corpus, model size, or chat settings:
 
 ```python
 CONFIG = dict(
-    corpus="shakespeare,orbit-chat:12",  # what to learn
+    corpus="orbit-chat:20",             # what to learn
     preset="auto",                       # auto|nano|micro|mini|small|base
     vocab_size=1024,
     out_dir="/content/orbit_model",
@@ -94,7 +94,7 @@ GPU and `--dataset` to point at your own text.
 python train.py --dataset ./notes.txt                       # one file
 python train.py --dataset ./my_folder                       # every .txt in a folder
 python train.py --dataset "https://example.com/book.txt"    # or a URL
-python train.py --dataset "shakespeare,orbit-chat:12"       # or mix corpora
+python train.py --dataset "shakespeare,orbit-chat:20"       # or mix corpora
 ```
 
 Then chat with it:
@@ -111,11 +111,15 @@ python generate.py -c out/orbit -p "Once upon a time" -t 0.9 -n 3
 
 | preset | layers | heads | width | context | params | trains in |
 |--------|--------|-------|-------|---------|--------|-----------|
-| `nano`  | 4  | 4  | 128 | 128 | 0.8M  | ~2 min (CPU, 2k steps) |
-| `micro` | 6  | 6  | 192 | 192 | 2.7M  | ~2 min (T4 GPU) |
+| `nano`  | 4  | 4  | 128 | 128 | 0.8M  | ~5 min (laptop CPU) · ~1 min (T4) |
+| `micro` | 6  | 6  | 192 | 192 | 2.7M  | ~2 min (T4 GPU) · ~25 min (laptop CPU) |
 | `mini`  | 8  | 8  | 256 | 256 | 6.4M  | ~6 min (T4 GPU) |
 | `small` | 10 | 12 | 384 | 320 | 17.8M | ~20 min (T4 GPU) |
 | `base`  | 12 | 8  | 512 | 384 | 38.0M | ~1 h (needs a big corpus) |
+
+Timings are for the default 2000 steps on the default corpus; the CPU numbers
+were measured on a 2-core machine, so a typical 8-core laptop is ~4× quicker
+(`nano` finishes in well under two minutes). GPU numbers are estimates.
 
 Parameter counts assume the default 1024-token vocabulary. Memory use is tiny:
 even `base` fits in a few GB with the default batch size, and `nano` runs in
@@ -140,14 +144,26 @@ Linux/GPU), `--dtype bf16|fp16|fp32`, `--resume out/orbit/model.pt`,
 | name | what it is |
 |------|------------|
 | `shakespeare` | ~1.1 MB of Shakespeare (the classic nanoGPT corpus) |
-| `orbit-chat`  | ~100 short `User:` / `Assistant:` exchanges built into the repo |
+| `orbit-chat`  | 137 short `User:` / `Assistant:` exchanges built into the repo |
 | `alice`, `pride`, `shakespeare-sonnets` | Project Gutenberg books |
 
-A corpus spec can repeat a source with `:n`, so `shakespeare,orbit-chat:12`
-trains on Shakespeare plus the assistant corpus repeated 12 times (about 25% of
-all tokens) — that is the default, and it gives you a model that both writes
-English and behaves like a chat assistant. Files download once into
-`~/.cache/orbit-gpt`.
+A corpus spec can repeat a source with `:n`. The default is `orbit-chat:20` —
+the built-in assistant corpus repeated 20 times (about 500 KB of text) —
+because that is what makes a *small* model behave like a chat assistant.
+Downloads are cached in `~/.cache/orbit-gpt`.
+
+Which corpus should you use?
+
+| goal | corpus | what to expect |
+|------|--------|----------------|
+| best chat answers | `orbit-chat:20` (default) | ~8/10 short questions answered correctly |
+| writer *and* chat | `shakespeare,orbit-chat:20` | funnier, less accurate (~6/10) |
+| best prose | `shakespeare` or a big book | fluent-ish pastiche, no chat ability |
+| your own data | `./notes.txt,orbit-chat:10` | your text, still able to chat |
+
+(Measured with the `nano` preset: 10 mixed questions after 2000 steps. More
+capacity — the `micro`/`mini` presets — narrows the gap, so mixing is a good
+deal once you are on a GPU.)
 
 ---
 
@@ -231,7 +247,15 @@ Run the tests with `python tests/test_smoke.py`.
 
 OrbitGPT is a *toy* by modern standards — it is the "nanoGPT on Shakespeare"
 scale of model, trained for minutes on a few megabytes of text. It will produce
-recognisable, often charming, frequently wrong text. It is genuinely useful as:
+recognisable, often charming, frequently wrong text.
+
+Be aware of one thing in particular: the built-in `orbit-chat` corpus is only
+26 KB, so with the default settings the model largely **memorises** those 137
+exchanges. It will answer those questions well and anything you did not train
+on poorly. That is normal for a model this size and is the reason to feed it
+your own, larger corpus once you want something less canned.
+
+It is genuinely useful as:
 
 * a model you can read end-to-end and understand completely,
 * a local playground for prompting, sampling and fine-tuning experiments,

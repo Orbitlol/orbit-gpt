@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyTorch (CPU)
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch
+
+      - name: Lint
+        run: |
+          pip install pyflakes
+          python -m pyflakes orbit_gpt/*.py *.py tools/*.py tests/*.py
+
+      - name: Tests
+        run: python tests/test_smoke.py
+
+      - name: Colab file is in sync with the package
+        run: |
+          python tools/build_colab.py
+          git diff --exit-code colab/orbit_gpt_colab.py
+
+      - name: Smoke-train a nano model (CPU, 20 steps)
+        run: python train.py --dataset orbit-chat:5 --preset nano --max-steps 20
+          --eval-interval 10 --log-interval 10 --vocab-size 400 --out-dir /tmp/ci
+          --sample-tokens 20

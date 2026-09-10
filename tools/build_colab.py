@@ -51,7 +51,7 @@ edit the package, not this file.
 # CONFIG - change these, then re-run the cell
 # ---------------------------------------------------------------------------
 CONFIG = dict(
-    corpus="shakespeare,orbit-chat:12",  # text to learn: builtin[:repeat], file, URL
+    corpus="orbit-chat:20",  # text to learn: builtin[:repeat], file, folder or URL
     preset="auto",        # auto|nano|micro|mini|small|base  (auto: micro on GPU)
     vocab_size=1024,      # BPE vocabulary size
     block_size=None,      # context length (None = preset default)

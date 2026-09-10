@@ -20,7 +20,7 @@ edit the package, not this file.
 # CONFIG - change these, then re-run the cell
 # ---------------------------------------------------------------------------
 CONFIG = dict(
-    corpus="shakespeare,orbit-chat:12",  # text to learn: builtin[:repeat], file, URL
+    corpus="orbit-chat:20",  # text to learn: builtin[:repeat], file, folder or URL
     preset="auto",        # auto|nano|micro|mini|small|base  (auto: micro on GPU)
     vocab_size=1024,      # BPE vocabulary size
     block_size=None,      # context length (None = preset default)
@@ -1275,11 +1275,11 @@ def resolve_dtype(device: torch.device, preference: str = "auto") -> torch.dtype
         return torch.bfloat16
     if preference in ("fp16", "float16"):
         return torch.float16
-    # auto
+    # auto: mixed precision pays off on CUDA.  On CPU/MPS plain fp32 is the
+    # predictable choice (bf16 on CPU only helps on very recent chips), so we
+    # leave it off unless you ask for it with --dtype bf16.
     if device.type == "cuda":
         return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    if device.type == "cpu" and getattr(torch.cpu, "is_bf16_supported", lambda: False)():
-        return torch.bfloat16
     return torch.float32
 
 
@@ -1326,7 +1326,7 @@ class Trainer:
             self.scaler = torch.amp.GradScaler(
                 self.device.type, enabled=(self.amp_dtype == torch.float16)
             )
-        except (AttributeError, TypeError):  # older torch
+        except Exception:  # older torch, or a device the new API rejects
             self.scaler = torch.cuda.amp.GradScaler(
                 enabled=(self.amp_dtype == torch.float16)
             )
@@ -1544,8 +1544,7 @@ def train_from_text(
     tokenizer: Optional[Tokenizer] = None,
     verbose: bool = True,
 ) -> Tuple[GPT, Tokenizer, Dict[str, float]]:
-    """Tokenize ``text`` and train a model end to end.  This is the one call the
-    Colab script uses."""
+    """Tokenize ``text`` and train a model end to end in one call."""
     if tokenizer is None:
         tokenizer = build_tokenizer(text, tokenizer_kind, vocab_size, verbose)
     ids = tokenizer.encode(text)
