@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--tokenizer", choices=("bpe", "char"), default="bpe")
     d.add_argument("--vocab-size", type=int, default=1024)
     d.add_argument("--val-fraction", type=float, default=0.1)
+    d.add_argument("--no-shuffle", action="store_true",
+                   help="keep repeated copies of a corpus in the same order")
 
     m = p.add_argument_group("model")
     m.add_argument(
@@ -116,7 +118,9 @@ def main(argv=None) -> int:
 
     print(f"OrbitGPT | preset={preset_name} device={device}")
     print(f"loading corpus: {args.dataset}")
-    text = load_corpus(args.dataset, cache_dir=Path(args.cache_dir))
+    text = load_corpus(
+        args.dataset, cache_dir=Path(args.cache_dir), shuffle=not args.no_shuffle
+    )
     print(f"corpus: {len(text):,} characters\n")
 
     tokenizer = build_tokenizer(text, args.tokenizer, args.vocab_size)

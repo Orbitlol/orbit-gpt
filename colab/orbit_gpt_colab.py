@@ -1176,22 +1176,39 @@ def parse_spec(spec: str) -> List[Tuple[str, int]]:
     return out or [("shakespeare", 1)]
 
 
+def shuffle_blocks(text: str, seed: int = 0) -> str:
+    """Shuffle the blank-line separated blocks of ``text`` (deterministic)."""
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
+    random.Random(seed).shuffle(blocks)
+    return "\n\n".join(blocks)
+
+
 def load_corpus(
     spec: str = "shakespeare",
     cache_dir: Path = DEFAULT_CACHE_DIR,
     verbose: bool = True,
+    shuffle: bool = True,
 ) -> str:
-    """Build the training text for a corpus spec (see the module docstring)."""
+    """Build the training text for a corpus spec (see the module docstring).
+
+    Extra copies of a source (``name:3``) are shuffled block-wise unless
+    ``shuffle`` is False: repeating a corpus in the same order teaches a small
+    model the *document order*, and it then answers the exchange that follows
+    the previous one instead of the question you actually asked.
+    """
     cache_dir = Path(cache_dir)
     parts: List[str] = []
     for source, repeat in parse_spec(spec):
-        text = load_source(source, cache_dir, verbose=verbose)
+        text = load_source(source, cache_dir, verbose=verbose).strip()
         if verbose:
             print(
                 f"  + {source}: {len(text):,} characters"
-                + (f" (x{repeat})" if repeat > 1 else "")
+                + (f" (x{repeat}{', shuffled' if shuffle and repeat > 1 else ''})"
+                   if repeat > 1 else "")
             )
-        parts.extend([text] * repeat)
+        parts.append(text)
+        for copy in range(repeat - 1):
+            parts.append(shuffle_blocks(text, seed=copy) if shuffle else text)
     return "\n\n".join(parts)
 
 
@@ -1569,12 +1586,13 @@ def train_from_text(
 
 
 
-DEFAULT_PREAMBLE = (
-    "The following is a conversation between a human (User) and a helpful, "
-    "harmless, and honest AI assistant named Orbit.\n"
-    "Orbit is a small language model that runs locally on a personal computer. "
-    "Orbit answers clearly and concisely, and admits when it does not know something."
-)
+# A persona header prepended to every chat prompt.  It is empty by default on
+# purpose: a preamble that only ever appears at the *top* of the training text
+# teaches a small model "this is the start of the document", and it then answers
+# every question with the first exchange it memorised (measured: 10/10 correct
+# answers without a preamble vs ~1/10 with one).  If you want a persona, put the
+# same text at the top of *every* training document and pass it here.
+DEFAULT_PREAMBLE = ""
 
 # The model keeps talking after its answer; these strings mark the turn boundary.
 DEFAULT_STOP_STRINGS = ("\nUser:", "\nUser :", "\nSystem:")
@@ -1604,13 +1622,13 @@ def format_chat(
 
     The layout matches the training corpus exactly::
 
-        <preamble>
-
         User: hi
         Assistant: hello
 
         User: next question
         Assistant:
+
+    With a non-empty ``preamble`` it is prepended, separated by a blank line.
     """
     lines: List[str] = []
     for i, (role, text) in enumerate(history):
@@ -1618,7 +1636,34 @@ def format_chat(
             lines.append("")  # blank line between turns
         lines.append(f"{role}: {text}")
     body = "\n".join(lines)
-    return f"{preamble}\n\n{body}\nAssistant:" if body else f"{preamble}\n\nAssistant:"
+    if not body:
+        return f"{preamble}\n\nAssistant:" if preamble else "Assistant:"
+    return f"{preamble}\n\n{body}\nAssistant:" if preamble else f"{body}\nAssistant:"
+
+
+def _earliest_stop(text: str, stops: Sequence[str]) -> int:
+    """Index of the first stop string in ``text``, or -1."""
+    best = -1
+    for s in stops:
+        i = text.find(s)
+        if i != -1 and (best == -1 or i < best):
+            best = i
+    return best
+
+
+def _hold_back(text: str, stops: Sequence[str]) -> int:
+    """How many characters at the end of ``text`` to keep unprinted.
+
+    Anything that could still *become* a stop string (or a half-decoded UTF-8
+    character) is held back so streaming never shows text we are about to cut.
+    """
+    hold = 4  # longest UTF-8 sequence: never print a partial character
+    for s in stops:
+        for k in range(min(len(s) - 1, len(text)), 0, -1):
+            if text.endswith(s[:k]):
+                hold = max(hold, k)
+                break
+    return min(hold, len(text))
 
 
 def generate(
@@ -1636,8 +1681,10 @@ def generate(
 ) -> str:
     """Generate a completion for ``prompt`` and return only the new text."""
     device = device or next(model.parameters()).device
-    stop_ids = list(stop_strings)
+    stops = list(stop_strings)
     produced: List[int] = []
+    printed = 0
+
     for new_id in model.stream(
         tokenizer.encode(prompt),
         max_new_tokens=max_new_tokens,
@@ -1649,22 +1696,48 @@ def generate(
         device=device,
     ):
         produced.append(new_id)
+        text = tokenizer.decode(produced)
+        cut = _earliest_stop(text, stops) if stops else -1
+        if cut >= 0:
+            if stream:
+                sys.stdout.write(text[printed:cut] + "\n")
+                sys.stdout.flush()
+            return text[:cut]
         if stream:
-            sys.stdout.write(tokenizer.decode([new_id]))
-            sys.stdout.flush()
-        if stop_ids:
-            text = tokenizer.decode(produced)
-            for s in stop_ids:
-                if s in text:
-                    text = text.split(s)[0]
-                    if stream:
-                        sys.stdout.write("\n")
-                        sys.stdout.flush()
-                    return text
+            upto = len(text) - _hold_back(text, stops)
+            if upto > printed:
+                sys.stdout.write(text[printed:upto])
+                sys.stdout.flush()
+                printed = upto
+
+    text = tokenizer.decode(produced)
     if stream:
-        sys.stdout.write("\n")
+        sys.stdout.write(text[printed:] + "\n")
         sys.stdout.flush()
-    return tokenizer.decode(produced)
+    return text
+
+
+def _trim_history(
+    history: List[Tuple[str, str]],
+    tokenizer: Tokenizer,
+    block_size: int,
+    preamble: str,
+    keep_fraction: float = 0.6,
+) -> List[Tuple[str, str]]:
+    """Drop the oldest exchanges so the prompt leaves room for a reply.
+
+    The context window has to hold the prompt *and* the answer, so we keep the
+    prompt to roughly half of it and forget the beginning of the conversation
+    when it no longer fits.
+    """
+    budget = max(16, int(block_size * keep_fraction))
+    # history ends with the question we are about to answer, so we only ever
+    # drop whole exchanges from the front and never that last message.
+    while len(history) >= 3:
+        if len(tokenizer.encode(format_chat(history, preamble))) <= budget:
+            break
+        history = history[2:]  # forget the oldest User+Assistant exchange
+    return history
 
 
 def chat(
@@ -1723,6 +1796,8 @@ def chat(
             continue
 
         history.append(("User", user))
+        # keep the prompt (plus room for the answer) inside the context window
+        history = _trim_history(history, tokenizer, model.config.block_size, preamble)
         prompt = format_chat(history, preamble)
         print("Orbit: ", end="", flush=True)
         answer = generate(
@@ -1739,17 +1814,20 @@ def chat(
             stream=True,
         )
         answer = answer.strip()
-        history.append(("Assistant", answer))
-        # keep the prompt inside the context window
+        if not answer:
+            print(
+                "(no room left in the context window - try /reset, or train with a "
+                "larger --block-size)"
+            )
+            history.pop()  # forget the question we could not answer
+        else:
+            history.append(("Assistant", answer))
         history = history[-max_turns:]
 
 # ---------------------------------------------------------------------------
 # Built-in assistant corpus (packed in so this file works with zero downloads)
 # ---------------------------------------------------------------------------
-EMBEDDED_CHAT_CORPUS = r"""The following is a conversation between a human (User) and a helpful, harmless, and honest AI assistant named Orbit.
-Orbit is a small language model that runs locally on a personal computer. Orbit answers clearly and concisely, and admits when it does not know something.
-
-User: Hello!
+EMBEDDED_CHAT_CORPUS = r"""User: Hello!
 Assistant: Hello! I'm Orbit, a small language model running on your machine. What can I help you with today?
 
 User: Hi there.

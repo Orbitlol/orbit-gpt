@@ -105,6 +105,11 @@ python generate.py --checkpoint out/orbit --chat
 python generate.py -c out/orbit -p "Once upon a time" -t 0.9 -n 3
 ```
 
+In the chat box: `/reset` clears the conversation, `/temp 1.0` changes the
+sampling temperature, `/tokens 300` changes the reply length, `/quit` leaves.
+Long conversations are trimmed automatically so they always fit the context
+window (the `nano` model remembers roughly the last exchange, `micro` a few).
+
 ---
 
 ## 📏 Model sizes
@@ -150,7 +155,13 @@ Linux/GPU), `--dtype bf16|fp16|fp32`, `--resume out/orbit/model.pt`,
 A corpus spec can repeat a source with `:n`. The default is `orbit-chat:20` —
 the built-in assistant corpus repeated 20 times (about 500 KB of text) —
 because that is what makes a *small* model behave like a chat assistant.
-Downloads are cached in `~/.cache/orbit-gpt`.
+
+Repeated copies are **shuffled** (block by block, deterministically): feeding
+the same 137 exchanges in the same order 20 times teaches a tiny model the
+*document order*, and it then replies with whatever exchange came next in the
+corpus instead of answering your question. Pass `--no-shuffle` to turn that off
+(useful when repeating a novel, where order is the point). Downloads are cached
+in `~/.cache/orbit-gpt`.
 
 Which corpus should you use?
 
@@ -175,7 +186,7 @@ from orbit_gpt.config import get_preset
 from orbit_gpt.data import load_corpus, TokenDataset
 from orbit_gpt.generate import chat, generate
 
-text = load_corpus("shakespeare,orbit-chat:12")
+text = load_corpus("orbit-chat:20")
 tok = build_tokenizer(text, "bpe", vocab_size=1024)
 dataset = TokenDataset(tok.encode(text), val_fraction=0.1)
 
@@ -216,7 +227,7 @@ orbit-gpt/
 │   ├── orbit_gpt_colab.py         # self-contained single file for Colab
 │   └── OrbitGPT_Colab.ipynb       # ready-made notebook
 ├── tools/build_colab.py           # regenerates the single file from the package
-└── tests/test_smoke.py            # 17 fast tests, no pytest needed
+└── tests/test_smoke.py            # 20 fast tests, no pytest needed
 ```
 
 `colab/orbit_gpt_colab.py` is **generated** from the package by
@@ -234,6 +245,10 @@ the real code.
   a few hundred KB).
 * **Repetitive chat answers?** Sample with a higher `--temperature` (0.9–1.0)
   and lower `--top-p` (0.9). Generation uses top-k + nucleus sampling.
+* **It answers fine at first, then drifts?** A small model reads its own
+  replies, so one wrong answer poisons the next turn. Type `/reset` in the chat
+  box, or train a bigger preset: more capacity means longer, more reliable
+  conversations.
 * **Out of memory?** Smaller `--batch-size` with `--grad-accum 4` keeps the
   effective batch size while cutting memory.
 * **Faster on CPU?** Use the `nano` preset, keep `--block-size 128`, and let
@@ -246,7 +261,7 @@ Run the tests with `python tests/test_smoke.py`.
 ## 🎯 Honest expectations
 
 OrbitGPT is a *toy* by modern standards — it is the "nanoGPT on Shakespeare"
-scale of model, trained for minutes on a few megabytes of text. It will produce
+scale of model, trained for minutes on a few hundred kilobytes of text. It will produce
 recognisable, often charming, frequently wrong text.
 
 Be aware of one thing in particular: the built-in `orbit-chat` corpus is only

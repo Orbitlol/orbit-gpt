@@ -19,7 +19,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orbit_gpt.config import GPTConfig, TrainConfig, get_preset  # noqa: E402
 from orbit_gpt.data import TokenDataset, parse_spec  # noqa: E402
-from orbit_gpt.generate import format_chat, load_model  # noqa: E402
+from orbit_gpt.generate import (  # noqa: E402
+    DEFAULT_PREAMBLE,
+    _earliest_stop,
+    _hold_back,
+    _trim_history,
+    format_chat,
+    load_model,
+)
 from orbit_gpt.model import GPT  # noqa: E402
 from orbit_gpt.tokenizer import (  # noqa: E402
     BPETokenizer,
@@ -212,12 +219,87 @@ def test_learning_rate_schedule():
 
 
 # --------------------------------------------------------------------------- chat
+def test_stop_string_helpers():
+    assert _earliest_stop("hi\nUser: yo", ["\nUser:"]) == 2
+    assert _earliest_stop("nothing here", ["\nUser:"]) == -1
+    # a partial stop string at the end must be held back while streaming
+    assert _hold_back("hello\nUs", ["\nUser:"]) >= 3
+    # ...but we still keep a margin so a multi-byte character is never split
+    assert _hold_back("hello", ["\nUser:"]) == 4
+
+
+def test_trim_history_keeps_prompt_inside_context():
+    tok = BPETokenizer().train(TINY_CORPUS, vocab_size=300)
+    history = [
+        (role, f"message number {i} with a bit more text so it costs tokens")
+        for i in range(10)
+        for role in ("User", "Assistant")
+    ]
+    history.append(("User", "and finally the question we are answering now"))
+    trimmed = _trim_history(history, tok, 128, DEFAULT_PREAMBLE)
+    assert len(trimmed) < len(history)
+    # the most recent question always survives, and we shrink until the prompt
+    # fits the budget (or until only that question is left)
+    assert trimmed[-1] == history[-1] and trimmed[-1][0] == "User"
+    prompt_tokens = len(tok.encode(format_chat(trimmed, DEFAULT_PREAMBLE)))
+    assert prompt_tokens <= int(128 * 0.6) or len(trimmed) == 1
+
+
+def test_corpus_has_no_preamble():
+    """The prompt must look exactly like the training text - pure exchanges.
+
+    A persona header that only appears at the top of the corpus teaches the
+    model "document start", which makes it ignore the actual question.
+    """
+    corpus = (
+        Path(__file__).resolve().parents[1] / "orbit_gpt" / "data" / "orbit_assistant.txt"
+    ).read_text(encoding="utf-8")
+    assert corpus.lstrip().startswith("User:")
+    assert DEFAULT_PREAMBLE == ""
+
+
+def test_chat_repl_never_runs_out_of_context():
+    """A long conversation must be trimmed instead of overflowing the window.
+
+    With a 32-token context an un-trimmed history runs out of room after two
+    turns and the REPL silently stops answering.
+    """
+    import builtins
+    import contextlib
+    import io
+
+    from orbit_gpt.generate import chat
+
+    tok = BPETokenizer().train(TINY_CORPUS, vocab_size=300)
+    cfg = GPTConfig(
+        vocab_size=tok.vocab_size, block_size=48, n_layer=2, n_head=4, n_embd=64,
+        dropout=0.0,
+    )
+    model = GPT(cfg).eval()
+    # questions made of words the tokenizer has seen, so the prompt is short
+    script = iter(["What is 2 + 2?", "What is the capital of France?", "What is 2 + 2?", "quit"])
+    real_input, buf = builtins.input, io.StringIO()
+    builtins.input = lambda prompt="": next(script)
+    try:
+        with contextlib.redirect_stdout(buf):
+            # stop_strings=() isolates the failure we care about: an untrained
+            # model may emit a turn marker at any time, but running out of
+            # context is a bug in the history trimming.
+            chat(model, tok, max_new_tokens=8, stop_strings=())
+    finally:
+        builtins.input = real_input
+    out = buf.getvalue()
+    assert "no room left" not in out
+    assert out.count("Orbit:") == 3
+
+
 def test_chat_prompt_format():
-    history = [("User", "hi"), ("Assistant", "hello there")]
+    # a chat prompt always ends with the question we want answered
+    history = [("User", "hi"), ("Assistant", "hello there"), ("User", "bye")]
     prompt = format_chat(history)
-    assert prompt.endswith("\nAssistant:")
-    assert "User: hi\nAssistant: hello there" in prompt
-    assert "Orbit" in prompt and prompt.startswith("The following is a conversation")
+    assert prompt == "User: hi\nAssistant: hello there\n\nUser: bye\nAssistant:"
+    assert format_chat([], "You are Orbit") == "You are Orbit\n\nAssistant:"
+    assert format_chat([]) == "Assistant:"
 
 
 # --------------------------------------------------------------------------- runner

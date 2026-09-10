@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import random
+import re
 import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -153,22 +155,39 @@ def parse_spec(spec: str) -> List[Tuple[str, int]]:
     return out or [("shakespeare", 1)]
 
 
+def shuffle_blocks(text: str, seed: int = 0) -> str:
+    """Shuffle the blank-line separated blocks of ``text`` (deterministic)."""
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
+    random.Random(seed).shuffle(blocks)
+    return "\n\n".join(blocks)
+
+
 def load_corpus(
     spec: str = "shakespeare",
     cache_dir: Path = DEFAULT_CACHE_DIR,
     verbose: bool = True,
+    shuffle: bool = True,
 ) -> str:
-    """Build the training text for a corpus spec (see the module docstring)."""
+    """Build the training text for a corpus spec (see the module docstring).
+
+    Extra copies of a source (``name:3``) are shuffled block-wise unless
+    ``shuffle`` is False: repeating a corpus in the same order teaches a small
+    model the *document order*, and it then answers the exchange that follows
+    the previous one instead of the question you actually asked.
+    """
     cache_dir = Path(cache_dir)
     parts: List[str] = []
     for source, repeat in parse_spec(spec):
-        text = load_source(source, cache_dir, verbose=verbose)
+        text = load_source(source, cache_dir, verbose=verbose).strip()
         if verbose:
             print(
                 f"  + {source}: {len(text):,} characters"
-                + (f" (x{repeat})" if repeat > 1 else "")
+                + (f" (x{repeat}{', shuffled' if shuffle and repeat > 1 else ''})"
+                   if repeat > 1 else "")
             )
-        parts.extend([text] * repeat)
+        parts.append(text)
+        for copy in range(repeat - 1):
+            parts.append(shuffle_blocks(text, seed=copy) if shuffle else text)
     return "\n\n".join(parts)
 
 
