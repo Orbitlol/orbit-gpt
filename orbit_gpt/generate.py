@@ -9,6 +9,7 @@ from typing import List, Optional, Sequence, Tuple
 import torch
 
 from orbit_gpt.model import GPT
+from orbit_gpt.skills import answer_arithmetic
 from orbit_gpt.tokenizer import Tokenizer, load_tokenizer
 
 # A persona header prepended to every chat prompt.  It is empty by default on
@@ -103,6 +104,7 @@ def generate(
     seed: Optional[int] = None,
     device: Optional[torch.device] = None,
     stream: bool = False,
+    repetition_penalty: float = 1.15,
 ) -> str:
     """Generate a completion for ``prompt`` and return only the new text."""
     device = device or next(model.parameters()).device
@@ -119,6 +121,7 @@ def generate(
         stop_token_ids=[tokenizer.eot_id],
         seed=seed,
         device=device,
+        repetition_penalty=repetition_penalty,
     ):
         produced.append(new_id)
         text = tokenizer.decode(produced)
@@ -177,13 +180,15 @@ def chat(
     seed: Optional[int] = None,
     max_turns: int = 8,
     stop_strings: Sequence[str] = DEFAULT_STOP_STRINGS,
+    repetition_penalty: float = 1.15,
+    use_skills: bool = True,
 ) -> None:
     """A tiny REPL: type a message, get an answer, repeat."""
     device = device or next(model.parameters()).device
     history: List[Tuple[str, str]] = []
     print(
         "\nOrbit is ready. Type a message and press Enter. "
-        "Commands: /reset, /temp 0.8, /tokens 200, /quit\n"
+        "Commands: /reset, /temp 0.8, /tokens 200, /rep 1.2, /quit\n"
     )
     while True:
         try:
@@ -212,6 +217,13 @@ def chat(
                 pass
             print(f"(temperature = {temperature})")
             continue
+        if user.lower().startswith("/rep "):
+            try:
+                repetition_penalty = float(user.split(None, 1)[1])
+            except ValueError:
+                pass
+            print(f"(repetition penalty = {repetition_penalty})")
+            continue
         if user.lower().startswith("/tokens "):
             try:
                 max_new_tokens = max(1, int(user.split(None, 1)[1]))
@@ -221,6 +233,15 @@ def chat(
             continue
 
         history.append(("User", user))
+        if use_skills:
+            # a 1M-parameter model cannot do multi-digit maths, so answer
+            # calculations with Python instead of letting it invent a number
+            exact = answer_arithmetic(user)
+            if exact is not None:
+                print(f"Orbit: {exact}")
+                history.append(("Assistant", exact))
+                history = history[-max_turns:]
+                continue
         # keep the prompt (plus room for the answer) inside the context window
         history = _trim_history(history, tokenizer, model.config.block_size, preamble)
         prompt = format_chat(history, preamble)
@@ -237,6 +258,7 @@ def chat(
             seed=seed,
             device=device,
             stream=True,
+            repetition_penalty=repetition_penalty,
         )
         answer = answer.strip()
         if not answer:

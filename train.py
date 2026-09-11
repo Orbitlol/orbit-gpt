@@ -40,13 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
     d = p.add_argument_group("data")
     d.add_argument(
         "--dataset",
-        default="orbit-chat:20",
+        default="conversation",
         help="corpus spec: name[:repeat],... a local file, a folder, or a URL "
         f"(known: {list_datasets()})",
     )
     d.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
     d.add_argument("--tokenizer", choices=("bpe", "char"), default="bpe")
-    d.add_argument("--vocab-size", type=int, default=1024)
+    d.add_argument("--vocab-size", type=int, default=2048)
     d.add_argument("--val-fraction", type=float, default=0.1)
     d.add_argument("--no-shuffle", action="store_true",
                    help="keep repeated copies of a corpus in the same order")
@@ -69,8 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--batch-size", type=int, default=None)
     t.add_argument("--grad-accum", type=int, default=1)
     t.add_argument("--max-steps", type=int, default=None)
-    t.add_argument("--epochs", type=float, default=None,
-                   help="if set, --max-steps is derived from the corpus size")
+    t.add_argument("--max-epochs", type=float, default=8.0,
+                   help="never train for more than this many passes over the "
+                        "corpus (keeps a small corpus from being memorised)")
     t.add_argument("--lr", type=float, default=2e-3)
     t.add_argument("--min-lr", type=float, default=2e-4)
     t.add_argument("--warmup-steps", type=int, default=100)
@@ -128,10 +129,12 @@ def main(argv=None) -> int:
     print(f"tokenized: {len(ids):,} tokens")
     dataset = TokenDataset(ids, val_fraction=args.val_fraction)
 
-    if args.epochs:
+    if args.max_epochs:
         tokens_per_step = batch_size * model_config.block_size * args.grad_accum
-        max_steps = max(1, math.ceil(dataset.n_train * args.epochs / tokens_per_step))
-        print(f"--epochs {args.epochs} -> {max_steps} steps")
+        epoch_cap = max(1, math.ceil(dataset.n_train * args.max_epochs / tokens_per_step))
+        if epoch_cap < max_steps:
+            print(f"--max-epochs {args.max_epochs} -> capping {max_steps} steps to {epoch_cap}")
+            max_steps = epoch_cap
 
     model_config.vocab_size = tokenizer.vocab_size
     model = GPT(model_config)

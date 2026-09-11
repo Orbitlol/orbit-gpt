@@ -8,9 +8,13 @@ a byte-level BPE tokenizer, a GPT-2 style transformer, a training loop, and a
 chat REPL.
 
 ```text
-python train.py                                  # ~2 min on a Colab T4
-python generate.py --checkpoint out/orbit --chat # talk to your model
+python train.py                                  # ~2 min on a Colab T4, once
+python generate.py --checkpoint out/orbit --chat # talk to your model, any time
 ```
+
+**Train it once, then just talk to it.** The checkpoint is saved automatically
+and every later run loads it instead of training again — on Colab it lives in
+your Google Drive, so it survives "Runtime → Disconnect".
 
 ---
 
@@ -38,8 +42,26 @@ print("orbit_gpt_colab.py:", os.path.getsize("orbit_gpt_colab.py"), "bytes")
 notebook kernel, which is what lets the chat box at the end read your typing.)
 
 That's it. The script prints its progress, shows a couple of samples when it is
-done, saves the model to `/content/orbit_model` (and offers it as a `.zip`
-download), then drops you into a chat box.
+done, saves the model, then drops you into a chat box.
+
+**The second time you run the cell it does not train.** It mounts your Google
+Drive, finds `MyDrive/orbit-gpt/orbit_model`, loads it and starts chatting in a
+couple of seconds:
+
+```text
+Found a trained model in /content/drive/MyDrive/orbit-gpt/orbit_model
+Loading it - no waiting. (--retrain = train a new one, --resume = keep training)
+```
+
+| what you want | how |
+|---------------|-----|
+| just chat with the model I trained earlier | run the cell again (nothing else) |
+| train a fresh model | `%run orbit_gpt_colab.py --retrain` |
+| keep training the saved one longer | `%run orbit_gpt_colab.py --resume` |
+| keep everything out of Google Drive | `%run orbit_gpt_colab.py --no-drive` |
+
+(On a local machine the same thing happens in the out directory: `python
+train.py` reuses `out/orbit` when it finds one.)
 
 **No download?** Either
 upload `colab/orbit_gpt_colab.py` from this repo into Colab and run
@@ -56,10 +78,12 @@ change the corpus, model size, or chat settings:
 
 ```python
 CONFIG = dict(
-    corpus="orbit-chat:20",             # what to learn
+    corpus="conversation",               # what to learn (generated, no download)
     preset="auto",                       # auto|nano|micro|mini|small|base
-    vocab_size=1024,
+    vocab_size=2048,
     out_dir="/content/orbit_model",
+    save_to_drive=True,                  # the checkpoint survives session restarts
+    retrain=False,                       # True = ignore the saved model
     ...
 )
 ```
@@ -68,7 +92,8 @@ It also works as a normal local script:
 
 ```bash
 python colab/orbit_gpt_colab.py --preset micro --corpus ./my_notes.txt
-python colab/orbit_gpt_colab.py --no-train --chat        # reload and just chat
+python colab/orbit_gpt_colab.py            # second run: loads, does not train
+python colab/orbit_gpt_colab.py --retrain  # ignore the saved model, train again
 ```
 
 ---
@@ -106,7 +131,8 @@ python generate.py -c out/orbit -p "Once upon a time" -t 0.9 -n 3
 ```
 
 In the chat box: `/reset` clears the conversation, `/temp 1.0` changes the
-sampling temperature, `/tokens 300` changes the reply length, `/quit` leaves.
+sampling temperature, `/tokens 300` changes the reply length, `/rep 1.3` turns
+up the repetition penalty, `/quit` leaves.
 Long conversations are trimmed automatically so they always fit the context
 window (the `nano` model remembers roughly the last exchange, `micro` a few).
 
@@ -126,7 +152,7 @@ Timings are for the default 2000 steps on the default corpus; the CPU numbers
 were measured on a 2-core machine, so a typical 8-core laptop is ~4× quicker
 (`nano` finishes in well under two minutes). GPU numbers are estimates.
 
-Parameter counts assume the default 1024-token vocabulary. Memory use is tiny:
+Parameter counts assume the default 2048-token vocabulary. Memory use is tiny:
 even `base` fits in a few GB with the default batch size, and `nano` runs in
 under 1 GB of RAM.
 
@@ -137,10 +163,10 @@ python train.py --preset micro --n-layer 8 --n-embd 256 --block-size 256 \
                 --batch-size 48 --max-steps 4000 --lr 3e-3
 ```
 
-Useful flags: `--tokenizer char` (baseline), `--vocab-size 2048`,
-`--epochs 20` (derive steps from corpus size), `--compile` (torch.compile,
-Linux/GPU), `--dtype bf16|fp16|fp32`, `--resume out/orbit/model.pt`,
-`--eval-interval`, `--save-interval`, `--seed`.
+Useful flags: `--tokenizer char` (baseline), `--vocab-size`,
+`--max-epochs 8` (cap the number of passes, so a small corpus is not memorised),
+`--compile` (torch.compile, Linux/GPU), `--dtype bf16|fp16|fp32`,
+`--resume out/orbit/model.pt`, `--eval-interval`, `--save-interval`, `--seed`.
 
 ---
 
@@ -148,18 +174,17 @@ Linux/GPU), `--dtype bf16|fp16|fp32`, `--resume out/orbit/model.pt`,
 
 | name | what it is |
 |------|------------|
+| `conversation` | **default** — ~28,000 generated `User:` / `Assistant:` exchanges (3.2 MB) built on the fly, no download |
 | `shakespeare` | ~1.1 MB of Shakespeare (the classic nanoGPT corpus) |
 | `orbit-chat`  | 137 short `User:` / `Assistant:` exchanges built into the repo |
 | `alice`, `pride`, `shakespeare-sonnets` | Project Gutenberg books |
 
-A corpus spec can repeat a source with `:n`. The default is `orbit-chat:20` —
-the built-in assistant corpus repeated 20 times (about 500 KB of text) —
-because that is what makes a *small* model behave like a chat assistant.
+A corpus spec can repeat a source with `:n`. The default is `conversation`.
 
 Repeated copies are **shuffled** (block by block, deterministically): feeding
-the same 137 exchanges in the same order 20 times teaches a tiny model the
-*document order*, and it then replies with whatever exchange came next in the
-corpus instead of answering your question. Pass `--no-shuffle` to turn that off
+the same exchanges in the same order over and over teaches a tiny model the
+*document order*, and it then replies with whatever came next in the corpus
+instead of answering your question. Pass `--no-shuffle` to turn that off
 (useful when repeating a novel, where order is the point). Downloads are cached
 in `~/.cache/orbit-gpt`.
 
@@ -167,14 +192,58 @@ Which corpus should you use?
 
 | goal | corpus | what to expect |
 |------|--------|----------------|
-| best chat answers | `orbit-chat:20` (default) | ~8/10 short questions answered correctly |
-| writer *and* chat | `shakespeare,orbit-chat:20` | funnier, less accurate (~6/10) |
+| best chat answers | `conversation` (default) | answers phrasings it never saw during training |
+| writer *and* chat | `shakespeare,conversation` | funnier, less accurate |
 | best prose | `shakespeare` or a big book | fluent-ish pastiche, no chat ability |
-| your own data | `./notes.txt,orbit-chat:10` | your text, still able to chat |
+| your own data | `./notes.txt,conversation` | your text, still able to chat |
 
-(Measured with the `nano` preset: 10 mixed questions after 2000 steps. More
-capacity — the `micro`/`mini` presets — narrows the gap, so mixing is a good
-deal once you are on a GPU.)
+---
+
+## 🗣️ Why it answers instead of reciting
+
+A 137-exchange corpus is *memorisable*: train on it and the model answers those
+137 questions beautifully and everything else by falling back on the nearest
+line it learned by heart. Three things stop that:
+
+1. **A generated corpus, not a written one.** `conversation` is built by
+   `orbit_gpt/corpora/conversation.py` at load time: ~28,000 exchanges, each
+   intent (greetings, identity, definitions, how-tos, chitchat, refusals,
+   advice, creative writing, meta) written with many question phrasings and 3-4
+   answer variants, sampled and shuffled deterministically. Every arithmetic
+   and unit-conversion answer is *computed*, so the training data is never
+   wrong. There is no canonical sentence for the model to memorise.
+2. **An epoch cap.** `--max-epochs 8` stops it grinding over the same text
+   until it is word-perfect.
+3. **A repetition penalty** (default 1.15) so it does not loop on one word.
+
+Check it yourself — ask something that is *not* in the corpus:
+
+```text
+You: I've always wondered what a transformer is.
+Orbit: A transformer is the architecture behind modern language models. Its
+       attention layers let each token weigh how relevant the others are...
+```
+
+(Greeting/topic/answer-opener combinations are sampled independently, so the
+reply is recomposed rather than copied — the phrasing above appears nowhere in
+the training text.)
+
+### Arithmetic
+
+A 1M-parameter model cannot add two 2-digit numbers in its head — it will
+invent "45 + 37 = 134". So `orbit_gpt/skills.py` answers clear calculations
+with Python and leaves everything else to the model:
+
+```text
+You: What is 45 + 37?        -> 45 + 37 = 82.
+You: What is 25% of 900?     -> 25% of 900 = 225.
+You: 120 kg in pounds        -> 120 kg is about 264.55 pounds.
+You: 100 f to c              -> 100 degrees Fahrenheit is about 37.8 degrees Celsius.
+```
+
+It is deliberately conservative: `answer_arithmetic(text)` returns `None`
+unless the message is unambiguously a calculation, so "what is 2 + 2 in
+Python?" still goes to the model. Verified on 12,000 random questions: 0 wrong.
 
 ---
 
@@ -186,8 +255,8 @@ from orbit_gpt.config import get_preset
 from orbit_gpt.data import load_corpus, TokenDataset
 from orbit_gpt.generate import chat, generate
 
-text = load_corpus("orbit-chat:20")
-tok = build_tokenizer(text, "bpe", vocab_size=1024)
+text = load_corpus("conversation")          # or "orbit-chat:20", a file, a URL...
+tok = build_tokenizer(text, "bpe", vocab_size=2048)
 dataset = TokenDataset(tok.encode(text), val_fraction=0.1)
 
 cfg = get_preset("micro")
@@ -220,14 +289,18 @@ orbit-gpt/
 │   ├── data.py        # corpora, downloading, train/val split, batching
 │   ├── train.py       # AdamW + cosine schedule + AMP + checkpointing
 │   ├── generate.py    # sampling, stop strings, chat REPL
-│   └── data/orbit_assistant.txt   # built-in assistant corpus
+│   ├── skills.py      # deterministic arithmetic / unit conversions
+│   └── corpora/
+│       ├── conversation.py         # the generated dialogue corpus (default)
+│       └── orbit_assistant.txt     # small hand-written exchange corpus
 ├── train.py           # CLI: train a model
 ├── generate.py        # CLI: sample / chat
 ├── colab/
 │   ├── orbit_gpt_colab.py         # self-contained single file for Colab
 │   └── OrbitGPT_Colab.ipynb       # ready-made notebook
 ├── tools/build_colab.py           # regenerates the single file from the package
-└── tests/test_smoke.py            # 20 fast tests, no pytest needed
+├── tools/colab_footer.py          #   ...the Colab entry point it appends
+└── tests/                         # 32 fast tests, no pytest needed
 ```
 
 `colab/orbit_gpt_colab.py` is **generated** from the package by
@@ -264,11 +337,12 @@ OrbitGPT is a *toy* by modern standards — it is the "nanoGPT on Shakespeare"
 scale of model, trained for minutes on a few hundred kilobytes of text. It will produce
 recognisable, often charming, frequently wrong text.
 
-Be aware of one thing in particular: the built-in `orbit-chat` corpus is only
-26 KB, so with the default settings the model largely **memorises** those 137
-exchanges. It will answer those questions well and anything you did not train
-on poorly. That is normal for a model this size and is the reason to feed it
-your own, larger corpus once you want something less canned.
+**On memorising:** a model this size trained on a small hand-written corpus
+just recites it. That is why the default corpus is *generated* (see below) —
+thousands of phrasings per intent, so there is no single sentence to memorise.
+It still is not a general assistant: it has no world knowledge beyond its
+training text, no memory between sessions, and it will happily be wrong with
+total confidence.
 
 It is genuinely useful as:
 

@@ -252,7 +252,7 @@ def test_corpus_has_no_preamble():
     model "document start", which makes it ignore the actual question.
     """
     corpus = (
-        Path(__file__).resolve().parents[1] / "orbit_gpt" / "data" / "orbit_assistant.txt"
+        Path(__file__).resolve().parents[1] / "orbit_gpt" / "corpora" / "orbit_assistant.txt"
     ).read_text(encoding="utf-8")
     assert corpus.lstrip().startswith("User:")
     assert DEFAULT_PREAMBLE == ""
@@ -302,7 +302,145 @@ def test_chat_prompt_format():
     assert format_chat([]) == "Assistant:"
 
 
+# --------------------------------------------------------------- generated corpus
+def test_generated_conversation_corpus_is_deterministic_and_varied():
+    from orbit_gpt.corpora.conversation import build_conversation_corpus
+
+    a = build_conversation_corpus()
+    b = build_conversation_corpus()
+    assert a == b, "the generated corpus must be reproducible"
+    assert len(a) > 500_000, len(a)
+    assert a.count("User:") > 20_000
+    # the one line every canned corpus used to fall back on must be gone
+    assert "How can I help you today?" not in a
+
+
+def test_generated_corpus_answers_are_correct():
+    """Every arithmetic answer in the corpus must actually be right.
+
+    The answers are computed, not written by hand - this is the guard that
+    keeps the model from being trained on wrong maths.
+    """
+    from orbit_gpt.corpora.conversation import build_conversation_corpus
+
+    text = build_conversation_corpus()
+    checked = 0
+    for line in text.splitlines():
+        if " = " not in line:
+            continue
+        head, tail = line.split("Assistant:", 1)[-1].rsplit(" = ", 1)
+        got = tail.rstrip(".").strip()
+        if not got.lstrip("-").isdigit():
+            continue
+        got = int(got)
+        # "81 - 39 = 42"
+        for op, combine in (("+", int.__add__), ("\u00d7", int.__mul__),
+                            ("\u2212", int.__sub__), ("-", int.__sub__)):
+            if op in head:
+                left, right = head.split(op, 1)
+                if left.strip().isdigit() and right.strip().isdigit():
+                    assert got == combine(int(left), int(right)), line
+                    checked += 1
+                break
+        else:
+            # "10% of 200 = 20" and "6 squared = 36"
+            if "% of " in head:
+                percent, base = head.split("% of ", 1)
+                if percent.strip().isdigit() and base.strip().isdigit():
+                    assert got == round(int(base) * int(percent) / 100), line
+                    checked += 1
+            elif head.strip().endswith("squared"):
+                base = head.strip()[: -len("squared")].strip()
+                if base.isdigit():
+                    assert got == int(base) ** 2, line
+                    checked += 1
+    assert checked > 500, checked
+
+def test_generated_corpus_leaves_holdout_values_for_the_tests():
+    """The corpus must NOT contain the numbers/phrasings the eval relies on."""
+    from orbit_gpt.corpora.conversation import (
+        TEST_ASKS,
+        TEST_HOW_ASKS,
+        build_conversation_corpus,
+    )
+
+    text = build_conversation_corpus()
+    for phrasing in TEST_ASKS + TEST_HOW_ASKS:
+        assert phrasing.format(t="anything") not in text
+    # 3-digit addition is never trained on, so it is a fair generalisation test
+    assert "137 + 268" not in text
+    assert "500 - 137" not in text
+
+
+def test_conversation_corpus_loads_through_the_data_module():
+    from orbit_gpt.data import load_corpus
+
+    text = load_corpus("conversation")
+    assert text.count("User:") > 20_000
+    assert text == load_corpus("conversation")
+
+
+def test_repetition_penalty_stops_the_same_token_looping():
+    """A tiny model otherwise repeats one word for the whole reply."""
+    from orbit_gpt import GPT
+    from orbit_gpt.config import GPTConfig
+
+    torch.manual_seed(0)
+    model = GPT(GPTConfig(vocab_size=80, block_size=32, n_layer=2, n_head=2, n_embd=32))
+    assert model.n_params > 0
+    logits = torch.randn(1, 80)
+    logits[0, 7] = 4.0  # one token dominates -> without a penalty it loops
+
+    def repeats(penalty, n=60):
+        out = []
+        for i in range(n):  # same draws for every penalty: only the penalty moves
+            generator = torch.Generator().manual_seed(i)
+            out.append(int(GPT._sample(logits.clone(), 1.0, None, 1.0, generator,
+                                       seen=out, repetition_penalty=penalty)))
+        return out.count(7)
+
+    assert repeats(1.0) > repeats(1.5) > repeats(2.5)
+
+def test_colab_build_can_reuse_a_saved_checkpoint(tmpdir=None):
+    """Train once, chat many times: a saved model must be detected and loaded."""
+    import tempfile
+
+    mod = _load_colab_module()
+    with tempfile.TemporaryDirectory() as d:
+        assert mod.find_checkpoint(d) is None
+        (Path(d) / "model.pt").write_bytes(b"x")       # a model with no tokenizer
+        assert mod.find_checkpoint(d) is None
+        (Path(d) / "tokenizer.json").write_text("{}")  # now it is complete
+        assert mod.find_checkpoint(d) == Path(d)
+    assert mod.CONFIG["save_to_drive"] is True
+    assert mod.CONFIG["retrain"] is False
+
+
+def test_colab_footer_is_the_one_shipped_in_the_built_file():
+    """tools/colab_footer.py is the source of the single-file build."""
+    footer = (Path(__file__).resolve().parent.parent / "tools" / "colab_footer.py").read_text(encoding="utf-8")
+    built = _colab_path().read_text(encoding="utf-8")
+    for needle in ("def mount_drive(", "def find_checkpoint(", "retrain", "save_to_drive"):
+        assert needle in footer
+        assert needle in built
+
+
 # --------------------------------------------------------------------------- runner
+def _colab_path():
+    from pathlib import Path
+
+    return Path(__file__).resolve().parent.parent / "colab" / "orbit_gpt_colab.py"
+
+
+def _load_colab_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("orbit_colab_built", _colab_path())
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def main() -> int:
     import inspect
     import traceback
@@ -312,6 +450,16 @@ def main() -> int:
         for name, fn in sorted(globals().items())
         if name.startswith("test_") and inspect.isfunction(fn)
     ]
+    # every other tests/test_*.py module is part of the same suite
+    import tests.test_skills as skills_module  # noqa: F401  (imported for its tests)
+
+    for extra in (skills_module,):
+        tests += [
+            (f"{extra.__name__.split('.')[-1]}.{name}", fn)
+            for name, fn in sorted(vars(extra).items())
+            if name.startswith("test_") and inspect.isfunction(fn)
+        ]
+    tests.sort()
     failures = 0
     for name, fn in tests:
         kwargs = {}

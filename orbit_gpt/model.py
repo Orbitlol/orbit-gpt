@@ -284,7 +284,17 @@ class GPT(nn.Module):
         top_k: Optional[int],
         top_p: float,
         generator: Optional[torch.Generator],
+        seen: Optional[Sequence[int]] = None,
+        repetition_penalty: float = 1.0,
     ) -> torch.Tensor:
+        if seen and repetition_penalty != 1.0:
+            # classic repetition penalty: shrink the score of tokens the reply
+            # already used, so small models stop looping on one word
+            for tid in set(int(t) for t in seen):
+                if logits[..., tid] > 0:
+                    logits[..., tid] = logits[..., tid] / repetition_penalty
+                else:
+                    logits[..., tid] = logits[..., tid] * repetition_penalty
         logits = logits / max(temperature, 1e-6)
         if top_k is not None and 0 < top_k < logits.size(-1):
             v, _ = torch.topk(logits, top_k)
@@ -312,6 +322,7 @@ class GPT(nn.Module):
         stop_token_ids: Sequence[int] = (),
         seed: Optional[int] = None,
         device: Optional[torch.device] = None,
+        repetition_penalty: float = 1.0,
     ) -> Iterator[int]:
         """Yield generated token ids one by one (KV cached, so this is fast)."""
         device = device or next(self.parameters()).device
@@ -333,7 +344,8 @@ class GPT(nn.Module):
         produced: List[int] = []
         for _ in range(max_new_tokens):
             next_id = self._sample(
-                logits[:, -1, :], temperature, top_k, top_p, generator
+                logits[:, -1, :], temperature, top_k, top_p, generator,
+                seen=produced, repetition_penalty=repetition_penalty,
             )
             new_id = int(next_id.item())
             if new_id in stop_token_ids:
@@ -361,6 +373,7 @@ class GPT(nn.Module):
         stop_token_ids: Sequence[int] = (),
         seed: Optional[int] = None,
         device: Optional[torch.device] = None,
+        repetition_penalty: float = 1.0,
         callback=None,
     ) -> List[int]:
         """Sample up to ``max_new_tokens`` ids.  ``callback(id)`` fires per token."""
@@ -375,6 +388,7 @@ class GPT(nn.Module):
             stop_token_ids=stop_token_ids,
             seed=seed,
             device=device,
+            repetition_penalty=repetition_penalty,
         ):
             out.append(new_id)
             if callback is not None:

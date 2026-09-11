@@ -168,10 +168,13 @@ class Trainer:
     def load_checkpoint(self, path: str) -> None:
         ckpt = torch.load(path, map_location=self.device)
         self.model.load_state_dict(ckpt["model_state"], strict=False)
-        if "train_config" in ckpt:
-            self.cfg = TrainConfig.from_dict(ckpt["train_config"])
-        self.step = int(ckpt.get("extra", {}).get("step", 0))
-        self.best_val = float(ckpt.get("extra", {}).get("val_loss", float("inf")))
+        extra = ckpt.get("extra", {})
+        # Only the *progress* is restored.  The config the caller passed wins,
+        # so you can resume with different steps / learning rate / out_dir.
+        self.step = int(extra.get("step", 0))
+        self.best_val = float(extra.get("val_loss", float("inf")))
+        if "history" in extra:
+            self.history = list(extra["history"])
         if self.verbose:
             print(f"resumed from {path} (step {self.step}, val {self.best_val:.4f})")
 

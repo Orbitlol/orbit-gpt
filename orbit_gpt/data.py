@@ -45,16 +45,30 @@ DATASETS: Dict[str, Tuple[str, ...]] = {
     ),
 }
 
-BUILTIN_DIR = Path(__file__).parent / "data"
+BUILTIN_DIR = Path(__file__).parent / "corpora"
 BUILTIN_DATASETS: Dict[str, Path] = {
     "orbit-chat": BUILTIN_DIR / "orbit_assistant.txt",
 }
+
+# Generated on the fly (see orbit_gpt/corpora/conversation.py): a large, varied
+# dialogue corpus.  This is the default because it is the only corpus big and
+# varied enough that a small model has to generalise instead of memorise.
+GENERATED_DATASETS = ("conversation",)
 
 USER_AGENT = "orbit-gpt/0.1 (+https://github.com/Orbitlol/orbit-gpt)"
 
 
 def list_datasets() -> str:
-    return ", ".join(sorted(list(DATASETS) + list(BUILTIN_DATASETS)))
+    return ", ".join(sorted(list(DATASETS) + list(BUILTIN_DATASETS) + list(GENERATED_DATASETS)))
+
+
+def generated_corpus(name: str) -> str:
+    """Build one of the synthetic corpora (deterministic, no network)."""
+    if name == "conversation":
+        from orbit_gpt.corpora.conversation import build_conversation_corpus
+
+        return build_conversation_corpus()
+    raise KeyError(f"unknown generated corpus {name!r}")
 
 
 def _download(url: str, dest: Path, verbose: bool = True) -> Path:
@@ -106,6 +120,10 @@ def _fetch_remote(name: str, cache_dir: Path, verbose: bool) -> str:
 
 def load_source(source: str, cache_dir: Path = DEFAULT_CACHE_DIR, verbose: bool = True) -> str:
     """Load one source: a built-in name, a URL, or a path on disk."""
+    if source in GENERATED_DATASETS:
+        if verbose:
+            print(f"  generating {source} corpus (no download needed)")
+        return generated_corpus(source)
     if source in BUILTIN_DATASETS:
         path = BUILTIN_DATASETS[source]
         if not path.exists():
