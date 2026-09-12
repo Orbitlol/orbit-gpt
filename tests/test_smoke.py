@@ -402,27 +402,65 @@ def test_repetition_penalty_stops_the_same_token_looping():
     assert repeats(1.0) > repeats(1.5) > repeats(2.5)
 
 def test_colab_build_can_reuse_a_saved_checkpoint(tmpdir=None):
-    """Train once, chat many times: a saved model must be detected and loaded."""
+    """Train once, chat many times: a saved model is detected and loaded."""
     import tempfile
 
     mod = _load_colab_module()
     with tempfile.TemporaryDirectory() as d:
-        assert mod.find_checkpoint(d) is None
-        (Path(d) / "model.pt").write_bytes(b"x")       # a model with no tokenizer
-        assert mod.find_checkpoint(d) is None
-        (Path(d) / "tokenizer.json").write_text("{}")  # now it is complete
-        assert mod.find_checkpoint(d) == Path(d)
-    assert mod.CONFIG["save_to_drive"] is True
+        assert mod.latest_checkpoint(d) is None
+        (Path(d) / "model.pt").write_bytes(b"x")       # best, no tokenizer yet
+        assert mod.latest_checkpoint(d) == Path(d) / "model.pt"
+        (Path(d) / "model-latest.pt").write_bytes(b"x")
+        assert mod.latest_checkpoint(d) == Path(d) / "model-latest.pt"
+    assert mod.CONFIG["use_web_search"] is True
     assert mod.CONFIG["retrain"] is False
 
 
-def test_colab_footer_is_the_one_shipped_in_the_built_file():
-    """tools/colab_footer.py is the source of the single-file build."""
+def test_colab_build_never_mentions_google_drive():
+    """Checkpoints live in /content or the repo - never in Drive."""
     footer = (Path(__file__).resolve().parent.parent / "tools" / "colab_footer.py").read_text(encoding="utf-8")
     built = _colab_path().read_text(encoding="utf-8")
-    for needle in ("def mount_drive(", "def find_checkpoint(", "retrain", "save_to_drive"):
-        assert needle in footer
-        assert needle in built
+    for source in (footer, built):
+        assert "google.colab import drive" not in source
+        assert "save_to_drive" not in source
+        assert "mount_drive" not in source
+    # and it must ship the pieces the new flow needs
+    for needle in ("default_checkpoint_dir(", "latest_checkpoint(",
+                   "use_web_search", "--resume"):
+        assert needle in footer, needle
+        assert needle in built, needle
+
+
+def test_micro_preset_is_the_default_and_is_bigger_than_nano():
+    from orbit_gpt.config import DEFAULT_PRESET, PRESET_TRAIN, get_preset
+
+    assert DEFAULT_PRESET == "micro"
+    micro, nano = get_preset("micro"), get_preset("nano")
+    micro.vocab_size = nano.vocab_size = 2048
+    micro.validate()
+    nano.validate()
+    from orbit_gpt.model import GPT
+
+    assert GPT(micro).n_params > 3 * GPT(nano).n_params
+    # every preset has hyper-parameters, and they all divide evenly
+    for name in ("nano", "micro", "mini", "small", "base"):
+        cfg = get_preset(name)
+        assert cfg.n_embd % cfg.n_head == 0, name
+        settings = PRESET_TRAIN[name]
+        for key in ("batch_size", "learning_rate", "warmup_steps", "weight_decay",
+                    "grad_clip", "grad_accum_steps", "max_epochs",
+                    "min_learning_rate"):
+            assert key in settings, (name, key)
+
+
+def test_preset_train_defaults_follow_the_device():
+    from orbit_gpt.config import preset_train_defaults
+
+    gpu = preset_train_defaults("micro", "cuda")
+    cpu = preset_train_defaults("micro", "cpu")
+    assert gpu["batch_size"] > cpu["batch_size"]   # a CPU cannot chew 24x384
+    assert gpu["warmup_steps"] >= 100 and gpu["grad_clip"] > 0
+
 
 
 # --------------------------------------------------------------------------- runner
@@ -451,11 +489,18 @@ def main() -> int:
         if name.startswith("test_") and inspect.isfunction(fn)
     ]
     # every other tests/test_*.py module is part of the same suite
-    import tests.test_skills as skills_module  # noqa: F401  (imported for its tests)
+    import importlib
+    import pkgutil
 
-    for extra in (skills_module,):
+    import tests as tests_package
+
+    for module_info in sorted(pkgutil.iter_modules(tests_package.__path__),
+                              key=lambda m: m.name):
+        if not module_info.name.startswith("test_") or module_info.name == "test_smoke":
+            continue
+        extra = importlib.import_module(f"tests.{module_info.name}")
         tests += [
-            (f"{extra.__name__.split('.')[-1]}.{name}", fn)
+            (f"{module_info.name}.{name}", fn)
             for name, fn in sorted(vars(extra).items())
             if name.startswith("test_") and inspect.isfunction(fn)
         ]

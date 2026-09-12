@@ -18,7 +18,7 @@ from typing import Optional
 __all__ = ["answer_arithmetic"]
 
 # unit conversions: (source names, target names, factor)  result = value * factor
-CONVERSIONS = (
+UNIT_CONVERSIONS = (
     (("km", "kms", "kilometre", "kilometres", "kilometer", "kilometers"),
      ("mile", "miles"), 0.621371),
     (("mile", "miles"), ("km", "kms", "kilometre", "kilometres", "kilometer",
@@ -93,19 +93,19 @@ def _temperature(text: str) -> Optional[str]:
         return None
     value, source, target = float(match.group(1)), match.group(2), match.group(3)
     result = _from_celsius(target, _to_celsius(source, value))
-    return (f"{_fmt(value)} {_TEMPERATURES[source]} is about "
-            f"{_fmt(result)} {_TEMPERATURES[target]}.")
+    return (f"{_fmt_number(value)} {_TEMPERATURES[source]} is about "
+            f"{_fmt_number(result)} {_TEMPERATURES[target]}.")
 
 # unit words that must survive the filler strip
 _UNIT_WORDS = "|".join(sorted(
-    {w for pair in CONVERSIONS for group in pair[:2] for w in group},
+    {w for pair in UNIT_CONVERSIONS for group in pair[:2] for w in group},
     key=len, reverse=True,
 ))
 
 _NUMBER = r"[0-9]+(?:\.[0-9]+)?"
 
 
-def _clean(text: str) -> str:
+def _clean_text(text: str) -> str:
     """Lowercase, expand words, drop question filler."""
     text = text.lower().strip()
     text = text.replace("\u00d7", " * ").replace("\u2212", "-")
@@ -123,7 +123,7 @@ def _clean(text: str) -> str:
     return text.rstrip("?!.").strip()
 
 
-def _fmt(value: float) -> str:
+def _fmt_number(value: float) -> str:
     rounded = round(value, 2)
     if abs(rounded - round(rounded)) < 1e-9:
         return str(int(round(rounded)))
@@ -150,9 +150,9 @@ def _convert(text: str) -> Optional[str]:
     if not match:
         return None
     value, source, target = float(match.group(1)), match.group(2), match.group(3)
-    for sources, targets, factor in CONVERSIONS:
+    for sources, targets, factor in UNIT_CONVERSIONS:
         if source in sources and target in targets:
-            return (f"{_fmt(value)} {source} is about {_fmt(value * factor)} "
+            return (f"{_fmt_number(value)} {source} is about {_fmt_number(value * factor)} "
                     f"{target}.")
     return None
 
@@ -169,7 +169,7 @@ def answer_arithmetic(text: str) -> Optional[str]:
     """
     if not text or len(text) > 200:
         return None
-    cleaned = _clean(text)
+    cleaned = _clean_text(text)
 
     # "how many pounds is 120 kilograms?"
     match = re.match(
@@ -177,9 +177,9 @@ def answer_arithmetic(text: str) -> Optional[str]:
     )
     if match:
         target, value, source = match.group(1), float(match.group(2)), match.group(3)
-        for sources, targets, factor in CONVERSIONS:
+        for sources, targets, factor in UNIT_CONVERSIONS:
             if source in sources and target in targets:
-                return (f"{_fmt(value)} {source} is about {_fmt(value * factor)} "
+                return (f"{_fmt_number(value)} {source} is about {_fmt_number(value * factor)} "
                         f"{target}.")
 
     converted = _convert(cleaned) or _temperature(cleaned)
@@ -189,19 +189,19 @@ def answer_arithmetic(text: str) -> Optional[str]:
     # "add 120 and 275" / "subtract 5 from 20" / "multiply 6 by 7" / "divide 9 by 3"
     match = re.match(rf"^add ({_NUMBER}) and ({_NUMBER})$", cleaned)
     if match:
-        return _phrase(_fmt(float(match.group(1)) + float(match.group(2))))
+        return _phrase(_fmt_number(float(match.group(1)) + float(match.group(2))))
     match = re.match(rf"^subtract ({_NUMBER}) from ({_NUMBER})$", cleaned)
     if match:
-        return _phrase(_fmt(float(match.group(2)) - float(match.group(1))))
+        return _phrase(_fmt_number(float(match.group(2)) - float(match.group(1))))
     match = re.match(rf"^multiply ({_NUMBER}) (?:by|and) ({_NUMBER})$", cleaned)
     if match:
-        return _phrase(_fmt(float(match.group(1)) * float(match.group(2))))
+        return _phrase(_fmt_number(float(match.group(1)) * float(match.group(2))))
     match = re.match(rf"^divide ({_NUMBER}) by ({_NUMBER})$", cleaned)
     if match:
         divisor = float(match.group(2))
         if divisor == 0:
             return "You can't divide by zero."
-        return _phrase(_fmt(float(match.group(1)) / divisor))
+        return _phrase(_fmt_number(float(match.group(1)) / divisor))
 
     # "45 + 37" / "45 - 37" / "45 * 37" / "45 / 37"
     match = re.match(rf"^({_NUMBER})\s*([-+*/])\s*({_NUMBER})$", cleaned)
@@ -209,33 +209,33 @@ def answer_arithmetic(text: str) -> Optional[str]:
         left, op, right = float(match.group(1)), match.group(2), float(match.group(3))
         if op == "+" or op == "-":
             result: float = left + right if op == "+" else left - right
-            return _phrase(f"{_fmt(left)} {op} {_fmt(right)} = {_fmt(result)}"
-                           if random.random() < 0.5 else _fmt(result))
+            return _phrase(f"{_fmt_number(left)} {op} {_fmt_number(right)} = {_fmt_number(result)}"
+                           if random.random() < 0.5 else _fmt_number(result))
         if op == "*":
-            return _phrase(f"{_fmt(left)} \u00d7 {_fmt(right)} = {_fmt(left * right)}"
-                           if random.random() < 0.5 else _fmt(left * right))
+            return _phrase(f"{_fmt_number(left)} \u00d7 {_fmt_number(right)} = {_fmt_number(left * right)}"
+                           if random.random() < 0.5 else _fmt_number(left * right))
         if right == 0:
             return "You can't divide by zero."
-        return _phrase(_fmt(left / right))
+        return _phrase(_fmt_number(left / right))
 
     # "25% of 900" / "25 percent of 900"
     match = re.match(rf"^({_NUMBER})\s*(?:%|percent)\s*of\s*({_NUMBER})$", cleaned)
     if match:
         percent, base = float(match.group(1)), float(match.group(2))
         result = base * percent / 100
-        return _phrase(f"{_fmt(percent)}% of {_fmt(base)} = {_fmt(result)}"
-                       if random.random() < 0.5 else _fmt(result))
+        return _phrase(f"{_fmt_number(percent)}% of {_fmt_number(base)} = {_fmt_number(result)}"
+                       if random.random() < 0.5 else _fmt_number(result))
 
     # "12 squared" / "12 cubed" / "12 ^ 2"
     match = re.match(rf"^({_NUMBER})\s*(?:\^|to the power of)\s*([23])$", cleaned)
     if match:
         base, power = float(match.group(1)), int(match.group(2))
-        return _phrase(_fmt(base ** power))
+        return _phrase(_fmt_number(base ** power))
     match = re.match(rf"^({_NUMBER})\s*(squared|cubed)$", cleaned)
     if match:
         base = float(match.group(1))
         power = 2 if match.group(2) == "squared" else 3
-        return _phrase(_fmt(base ** power))
+        return _phrase(_fmt_number(base ** power))
 
     # square root
     match = re.match(rf"^(?:square root of|sqrt)\s*({_NUMBER})$", cleaned)
@@ -243,5 +243,5 @@ def answer_arithmetic(text: str) -> Optional[str]:
         base = float(match.group(1))
         if base < 0:
             return "The square root of a negative number is not a real number."
-        return _phrase(_fmt(base ** 0.5))
+        return _phrase(_fmt_number(base ** 0.5))
     return None

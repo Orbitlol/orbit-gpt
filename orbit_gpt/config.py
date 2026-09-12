@@ -79,15 +79,18 @@ class TrainConfig:
 
 
 # ---------------------------------------------------------------------------
-# Size presets.  Parameter counts are approximate (they depend on vocab size);
-# the numbers below assume the default 1024-token vocabulary.
+# Size presets.  Parameter counts are measured with the default 2048-token
+# vocabulary; they move a little if you change --vocab-size.
 # ---------------------------------------------------------------------------
 PRESETS: Dict[str, Dict[str, Any]] = {
-    # ~1.2M params - trains in a couple of minutes even on a laptop CPU.
+    # 0.8M params - a fast smoke test.  Fine for "does the pipeline work",
+    # too small to write good prose.
     "nano": dict(n_layer=4, n_head=4, n_embd=128, block_size=128, dropout=0.1),
-    # ~4M params - the sweet spot for a 1MB corpus on a free Colab GPU (~2 min).
-    "micro": dict(n_layer=6, n_head=6, n_embd=192, block_size=192, dropout=0.1),
-    # ~9M params - noticeably better text, ~6 min on a T4.
+    # 4.8M params - THE DEFAULT.  ~6x the old nano model, and the 384-token
+    # context leaves room for a couple of web-search results.  A few minutes
+    # on a free Colab T4.
+    "micro": dict(n_layer=6, n_head=8, n_embd=256, block_size=384, dropout=0.1),
+    # 6.4M params - noticeably better text, ~10 min on a T4.
     "mini": dict(n_layer=8, n_head=8, n_embd=256, block_size=256, dropout=0.1),
     # ~20M params - needs a bigger corpus than tiny-shakespeare to shine.
     "small": dict(n_layer=10, n_head=12, n_embd=384, block_size=320, dropout=0.1),
@@ -95,19 +98,60 @@ PRESETS: Dict[str, Dict[str, Any]] = {
     "base": dict(n_layer=12, n_head=8, n_embd=512, block_size=384, dropout=0.1),
 }
 
-# Defaults that make sense without a GPU (kept deliberately small so that
-# `python train.py` on a laptop finishes in a few minutes).
+#: The preset used when you do not pass ``--preset``.
+#:
+#: ``nano`` (0.8M) is only kept for quick smoke tests - it is too small to
+#: produce coherent replies, which is why the default is now ``micro``.
+DEFAULT_PRESET = "micro"
+
+# ---------------------------------------------------------------------------
+# Training hyper-parameters that go with each preset.  Bigger models want a
+# smaller learning rate, more warmup and a smaller batch (with gradient
+# accumulation to keep the *effective* batch healthy).  These are the single
+# place to tune the run: --lr/--batch-size/... on the CLI override them.
+# ---------------------------------------------------------------------------
+PRESET_TRAIN: Dict[str, Dict[str, Any]] = {
+    "nano": dict(batch_size=32, grad_accum_steps=1, learning_rate=2e-3,
+                 min_learning_rate=2e-4, warmup_steps=100, weight_decay=0.1,
+                 grad_clip=1.0, max_epochs=8),
+    "micro": dict(batch_size=24, grad_accum_steps=1, learning_rate=2e-3,
+                  min_learning_rate=2e-4, warmup_steps=200, weight_decay=0.1,
+                  grad_clip=1.0, max_epochs=8),
+    "mini": dict(batch_size=16, grad_accum_steps=2, learning_rate=1.5e-3,
+                 min_learning_rate=1.5e-4, warmup_steps=200, weight_decay=0.1,
+                 grad_clip=1.0, max_epochs=8),
+    "small": dict(batch_size=8, grad_accum_steps=4, learning_rate=1e-3,
+                  min_learning_rate=1e-4, warmup_steps=300, weight_decay=0.1,
+                  grad_clip=1.0, max_epochs=8),
+    "base": dict(batch_size=4, grad_accum_steps=8, learning_rate=1e-3,
+                 min_learning_rate=1e-4, warmup_steps=500, weight_decay=0.1,
+                 grad_clip=1.0, max_epochs=8),
+}
+
+# Device-specific overrides, applied on top of PRESET_TRAIN.
 CPU_DEFAULTS: Dict[str, Any] = dict(
-    preset="nano",
+    preset=DEFAULT_PRESET,
     max_steps=2000,
-    batch_size=16,
+    batch_size=8,      # a laptop core cannot chew 24x384 tokens per step
 )
 
 GPU_DEFAULTS: Dict[str, Any] = dict(
-    preset="micro",
+    preset=DEFAULT_PRESET,
     max_steps=2000,
-    batch_size=32,
+    batch_size=None,   # None = whatever PRESET_TRAIN says
 )
+
+
+def preset_train_defaults(name: str, device_type: str = "cpu") -> Dict[str, Any]:
+    """Hyper-parameters for ``name`` on ``device_type`` ("cuda" or "cpu")."""
+    settings: Dict[str, Any] = dict(PRESET_TRAIN.get(name, PRESET_TRAIN[DEFAULT_PRESET]))
+    overrides = GPU_DEFAULTS if device_type == "cuda" else CPU_DEFAULTS
+    for key, value in overrides.items():
+        if key == "preset":
+            continue
+        if value is not None:
+            settings[key] = value
+    return settings
 
 
 def get_preset(name: str) -> GPTConfig:

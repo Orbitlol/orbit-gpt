@@ -32,6 +32,10 @@ def main(argv=None) -> int:
     p.add_argument("--device", default=None)
     p.add_argument("--no-stream", action="store_true")
     p.add_argument("--chat", action="store_true", help="start an interactive chat")
+    p.add_argument("--search", dest="search", action="store_true", default=None,
+                   help="enable web search in the chat (needs the ddgs package)")
+    p.add_argument("--no-search", dest="search", action="store_false",
+                   help="disable web search in the chat")
     p.add_argument("--stop", nargs="*", default=["\nUser:"],
                    help="stop generation when one of these strings appears")
     args = p.parse_args(argv)
@@ -49,6 +53,7 @@ def main(argv=None) -> int:
             top_k=args.top_k,
             top_p=args.top_p,
             seed=args.seed,
+            use_web_search=args.search,
         )
         return 0
 

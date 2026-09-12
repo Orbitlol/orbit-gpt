@@ -20,6 +20,8 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Sequence, Tuple
 
+from orbit_gpt.search import WEB_ANSWER_INSTRUCTION, WEB_BLOCK_HEADER
+
 # ---------------------------------------------------------------------------
 # how a question gets phrased
 # ---------------------------------------------------------------------------
@@ -759,13 +761,108 @@ def _exchange(rng: random.Random, question: str, answers: Sequence[str]) -> str:
     return f"User: {question}\nAssistant: {opener}{answer}"
 
 
+# ---------------------------------------------------------------------------
+# reading comprehension: "here are some web results, now answer"
+#
+# These are generated in exactly the layout orbit_gpt.search.augment_prompt()
+# produces at inference time, so the model learns to lift the answer out of
+# the snippets instead of guessing.  The snippets are obviously synthetic - the
+# point is the *skill*, not the facts.
+# ---------------------------------------------------------------------------
+_CONTEXT_SOURCES = (
+    "example.com", "news.example.org", "docs.example.net", "wiki.example.org",
+    "blog.example.com",
+)
+_CONTEXT_KINDS = (
+    "{name} - overview", "{name}: the short version", "{name} - reference",
+    "About {name}", "{name} explained",
+)
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July",
+           "August", "September", "October", "November", "December")
+
+
+def _slug(text: str) -> str:
+    return "".join(ch if ch.isalnum() else "-" for ch in text.lower()).strip("-")
+
+
+def _web_block(rng: random.Random, title: str, snippet: str) -> str:
+    url = f"https://{rng.choice(_CONTEXT_SOURCES)}/{_slug(title)}"
+    return f"{WEB_BLOCK_HEADER}\n\n[1] {title}\n    {url}\n    {snippet}"
+
+
+def _context_exchange(rng: random.Random, title: str, snippet: str,
+                      question: str, answer: str) -> str:
+    prompt = (
+        f"User: {_web_block(rng, title, snippet)}\n\n"
+        f"{WEB_ANSWER_INSTRUCTION.format(question=question)}\n"
+        f"Assistant: {answer}"
+    )
+    return prompt
+
+
+def _context_examples(rng: random.Random, count: int) -> List[str]:
+    blocks: List[str] = []
+    for _ in range(count):
+        roll = rng.random()
+        if roll < 0.45:
+            # a definition/how-to "page"
+            if rng.random() < 0.5:
+                topic, answers = rng.choice(list(FACTS.items()))
+                question = _pick(rng, WHAT_ASKS).format(t=topic)
+            else:
+                topic, answers = rng.choice(list(HOWTO.items()))
+                question = _pick(rng, HOW_ASKS).format(t=topic)
+            title = rng.choice(_CONTEXT_KINDS).format(name=topic.capitalize())
+            snippet = _pick(rng, answers)
+            answer = _pick(rng, ANSWER_OPENERS) + _pick(rng, answers)
+        else:
+            # a "current" page with a sampled value the model has to read
+            name = rng.choice(_CONTEXT_TOPICS)
+            value = rng.choice([2, 3, 5, 8, 12, 17, 24, 31, 42, 56, 73, 99, 128,
+                                256, 512, 1024])
+            unit = rng.choice(["million users", "countries", "cities", "repos",
+                               "papers", "requests per second", "gigabytes"])
+            month = rng.choice(_MONTHS)
+            year = rng.choice([2023, 2024, 2025, 2026])
+            title = f"{name} - latest figures"
+            snippet = (
+                f"As of {month} {year}, {name} reached {value} {unit}, up from "
+                f"{max(1, value // 3)} {unit} the year before."
+            )
+            if rng.random() < 0.4:
+                question = _pick(rng, (
+                    f"How many {unit} does {name} have now?",
+                    f"What is the latest figure for {name}?",
+                    f"According to the results, how big is {name}?",
+                ))
+                answer = f" {value} {unit} (as of {month} {year})."
+            else:
+                question = _pick(rng, (
+                    f"When was that {name} figure reported?",
+                    f"What date do the {name} numbers come from?",
+                    "According to the results, when was this measured?",
+                ))
+                answer = f" {month} {year}."
+        blocks.append(_context_exchange(rng, title, snippet, question, answer))
+    return blocks
+
+
+_CONTEXT_TOPICS = (
+    "the Orion telescope", "Project Lighthouse", "the Kestrel database",
+    "Aurora OS", "the Halcyon compiler", "Bluefin", "the Meridian satellite",
+    "Riverstone", "the Lumen API", "Cobalt", "Northwind Analytics",
+    "the Pallas robot",
+)
+
+
 def build_conversation_corpus(
     seed: int = 1337,
-    n_arithmetic: int = 5000,
-    n_conversions: int = 1500,
-    n_facts: int = 6000,
-    n_social: int = 5000,
-    n_dialogues: int = 3000,
+    n_arithmetic: int = 12000,
+    n_conversions: int = 4000,
+    n_facts: int = 15000,
+    n_social: int = 12000,
+    n_dialogues: int = 8000,
+    n_context: int = 6000,
     max_addend: int = 99,
 ) -> str:
     """Build a large dialogue corpus.  Same ``seed`` -> same text, every time."""
@@ -867,6 +964,9 @@ def build_conversation_corpus(
         blocks.append(
             "\n\n".join(f"User: {q}\nAssistant: {a}" for q, a in turns)
         )
+
+    # ---- reading comprehension (web-search grounding) --------------------
+    blocks.extend(_context_examples(rng, n_context))
 
     rng.shuffle(blocks)
     return "\n\n".join(blocks) + "\n"

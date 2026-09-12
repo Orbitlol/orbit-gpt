@@ -15,6 +15,12 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
+from orbit_gpt.checkpoints import (
+    BEST_NAME,
+    LATEST_NAME,
+    keep_last_n,
+    step_name,
+)
 from orbit_gpt.config import GPTConfig, TrainConfig
 from orbit_gpt.data import TokenDataset
 from orbit_gpt.model import GPT
@@ -151,7 +157,21 @@ class Trainer:
 
     # -- checkpointing ----------------------------------------------------
     def save_checkpoint(self, tag: str = "best") -> Path:
-        path = self.out_dir / ("model.pt" if tag == "best" else f"model-{tag}.pt")
+        """Save weights (+ tokenizer) under a predictable, sorted name.
+
+        ``best``   -> ``model.pt``          (best val loss; what inference loads)
+        ``latest`` -> ``model-latest.pt``   (freshest step; what --resume loads)
+        ``step750``-> ``model-step000750.pt`` (periodic, newest few are kept)
+        """
+        if tag == "best":
+            name = BEST_NAME
+        elif tag == "latest":
+            name = LATEST_NAME
+        elif tag.startswith("step") and tag[4:].isdigit():
+            name = step_name(int(tag[4:]))
+        else:
+            name = f"model-{tag}.pt"
+        path = self.out_dir / name
         self.model.save(
             path,
             extra={
@@ -163,6 +183,15 @@ class Trainer:
         )
         if self.tokenizer is not None:
             self.tokenizer.save(self.out_dir)
+        if tag.startswith("step"):
+            keep_last_n(self.out_dir)
+        return path
+
+    def save_latest(self) -> Path:
+        """Write ``model-latest.pt`` so a run can always be resumed."""
+        path = self.save_checkpoint("latest")
+        if self.verbose:
+            print(f"  saved {path.name} (step {self.step})")
         return path
 
     def load_checkpoint(self, path: str) -> None:
@@ -269,12 +298,14 @@ class Trainer:
 
             if cfg.save_interval and self.step % cfg.save_interval == 0:
                 self.save_checkpoint(f"step{self.step}")
+                self.save_latest()
 
         # final checkpoint (best weights are already on disk)
         final_val = self.estimate_loss()
         if final_val < self.best_val:
             self.best_val = final_val
             best_path = self.save_checkpoint("best")
+        self.save_latest()
         if self.verbose:
             print(
                 f"done in {_fmt_time(time.time()-self.start_time)} | "

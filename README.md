@@ -8,13 +8,15 @@ a byte-level BPE tokenizer, a GPT-2 style transformer, a training loop, and a
 chat REPL.
 
 ```text
-python train.py                                  # ~2 min on a Colab T4, once
-python generate.py --checkpoint out/orbit --chat # talk to your model, any time
+python train.py                                  # ~5 min on a Colab T4, once
+python generate.py --checkpoint checkpoints/orbit --chat   # talk to it, any time
 ```
 
-**Train it once, then just talk to it.** The checkpoint is saved automatically
-and every later run loads it instead of training again — on Colab it lives in
-your Google Drive, so it survives "Runtime → Disconnect".
+**Train it once, then just talk to it.** Checkpoints go to
+`checkpoints/orbit` inside the repo (`/content/checkpoints/orbit` when the
+single-file build runs standalone in Colab) — never to Google Drive — and every
+later run loads the newest one instead of training again. It can also search
+the web before answering when a question needs fresh information.
 
 ---
 
@@ -42,14 +44,17 @@ print("orbit_gpt_colab.py:", os.path.getsize("orbit_gpt_colab.py"), "bytes")
 notebook kernel, which is what lets the chat box at the end read your typing.)
 
 That's it. The script prints its progress, shows a couple of samples when it is
-done, saves the model, then drops you into a chat box.
+done, saves the model to `/content/checkpoints/orbit`, then drops you into a
+chat box. **No Google Drive is involved.**
 
-**The second time you run the cell it does not train.** It mounts your Google
-Drive, finds `MyDrive/orbit-gpt/orbit_model`, loads it and starts chatting in a
-couple of seconds:
+**The second time you run the cell it does not train.** It finds the checkpoint,
+loads it and starts chatting in a couple of seconds:
 
 ```text
-Found a trained model in /content/drive/MyDrive/orbit-gpt/orbit_model
+Checkpoints in /content/checkpoints/orbit
+  model-latest.pt          18.9 MB
+  model.pt                 18.9 MB
+Found a trained model: /content/checkpoints/orbit/model-latest.pt
 Loading it - no waiting. (--retrain = train a new one, --resume = keep training)
 ```
 
@@ -57,11 +62,11 @@ Loading it - no waiting. (--retrain = train a new one, --resume = keep training)
 |---------------|-----|
 | just chat with the model I trained earlier | run the cell again (nothing else) |
 | train a fresh model | `%run orbit_gpt_colab.py --retrain` |
-| keep training the saved one longer | `%run orbit_gpt_colab.py --resume` |
-| keep everything out of Google Drive | `%run orbit_gpt_colab.py --no-drive` |
+| keep training the saved one longer | `%run orbit_gpt_colab.py --resume --max-steps 4000` |
+| never touch the network | `%run orbit_gpt_colab.py --no-search` |
 
-(On a local machine the same thing happens in the out directory: `python
-train.py` reuses `out/orbit` when it finds one.)
+(On a local machine the same thing happens in `checkpoints/orbit` inside the
+repository.)
 
 **No download?** Either
 upload `colab/orbit_gpt_colab.py` from this repo into Colab and run
@@ -79,14 +84,20 @@ change the corpus, model size, or chat settings:
 ```python
 CONFIG = dict(
     corpus="conversation",               # what to learn (generated, no download)
-    preset="auto",                       # auto|nano|micro|mini|small|base
+    preset="micro",                      # nano|micro|mini|small|base  (micro = 4.8M)
     vocab_size=2048,
-    out_dir="/content/orbit_model",
-    save_to_drive=True,                  # the checkpoint survives session restarts
+    out_dir="",                          # "" = checkpoints/orbit (never Drive)
+    save_interval=250,                   # also write model-latest.pt every N steps
     retrain=False,                       # True = ignore the saved model
+    use_web_search=True,                 # False = never touch the network
+    web_results=5,                       # how many results go into the prompt
     ...
 )
 ```
+
+Hyper-parameters (learning rate, batch size, warmup, weight decay, gradient
+clipping, epoch cap) come from `PRESET_TRAIN` in `orbit_gpt/config.py`, so
+"make it bigger" is a one-line change.
 
 It also works as a normal local script:
 
@@ -94,6 +105,7 @@ It also works as a normal local script:
 python colab/orbit_gpt_colab.py --preset micro --corpus ./my_notes.txt
 python colab/orbit_gpt_colab.py            # second run: loads, does not train
 python colab/orbit_gpt_colab.py --retrain  # ignore the saved model, train again
+python colab/orbit_gpt_colab.py --resume   # keep training the saved model
 ```
 
 ---
@@ -142,19 +154,22 @@ window (the `nano` model remembers roughly the last exchange, `micro` a few).
 
 | preset | layers | heads | width | context | params | trains in |
 |--------|--------|-------|-------|---------|--------|-----------|
-| `nano`  | 4  | 4  | 128 | 128 | 0.8M  | ~5 min (laptop CPU) · ~1 min (T4) |
-| `micro` | 6  | 6  | 192 | 192 | 2.7M  | ~2 min (T4 GPU) · ~25 min (laptop CPU) |
-| `mini`  | 8  | 8  | 256 | 256 | 6.4M  | ~6 min (T4 GPU) |
-| `small` | 10 | 12 | 384 | 320 | 17.8M | ~20 min (T4 GPU) |
-| `base`  | 12 | 8  | 512 | 384 | 38.0M | ~1 h (needs a big corpus) |
+| `nano`  | 4  | 4  | 128 | 128 | 0.80M | ~5 min (laptop CPU) · ~1 min (T4) |
+| **`micro` (default)** | 6 | 8 | 256 | 384 | **4.82M** | **~5 min (T4 GPU)** · ~1 h (laptop CPU) |
+| `mini`  | 8  | 8  | 256 | 256 | 6.36M | ~10 min (T4 GPU) |
+| `small` | 10 | 12 | 384 | 320 | ~20M  | ~20 min (T4 GPU) |
+| `base`  | 12 | 8  | 512 | 384 | ~45M  | ~1 h (needs a big corpus) |
 
-Timings are for the default 2000 steps on the default corpus; the CPU numbers
-were measured on a 2-core machine, so a typical 8-core laptop is ~4× quicker
-(`nano` finishes in well under two minutes). GPU numbers are estimates.
+Parameter counts are measured with the default 2048-token vocabulary; timings
+are for 2000 steps on the 9.6 MB generated corpus (capped by `--max-epochs 8`).
+CPU numbers are from a 2-core machine, so a typical 8-core laptop is ~4x
+quicker. On CPU use `--preset nano` if you want an answer over lunch rather
+than after it.
 
-Parameter counts assume the default 2048-token vocabulary. Memory use is tiny:
-even `base` fits in a few GB with the default batch size, and `nano` runs in
-under 1 GB of RAM.
+The hyper-parameters that ship with each preset live in `PRESET_TRAIN`
+(`orbit_gpt/config.py`) — learning rate, warmup, weight decay, gradient
+clipping, batch size and gradient accumulation — so the whole training recipe
+is one dict you can edit.
 
 Everything is configurable:
 
@@ -166,7 +181,7 @@ python train.py --preset micro --n-layer 8 --n-embd 256 --block-size 256 \
 Useful flags: `--tokenizer char` (baseline), `--vocab-size`,
 `--max-epochs 8` (cap the number of passes, so a small corpus is not memorised),
 `--compile` (torch.compile, Linux/GPU), `--dtype bf16|fp16|fp32`,
-`--resume out/orbit/model.pt`, `--eval-interval`, `--save-interval`, `--seed`.
+`--resume auto`, `--eval-interval`, `--save-interval`, `--seed`.
 
 ---
 
@@ -206,12 +221,16 @@ A 137-exchange corpus is *memorisable*: train on it and the model answers those
 line it learned by heart. Three things stop that:
 
 1. **A generated corpus, not a written one.** `conversation` is built by
-   `orbit_gpt/corpora/conversation.py` at load time: ~28,000 exchanges, each
+   `orbit_gpt/corpora/conversation.py` at load time: ~74,000 exchanges (9.6 MB,
+   2.7M tokens with the default vocabulary), each
    intent (greetings, identity, definitions, how-tos, chitchat, refusals,
    advice, creative writing, meta) written with many question phrasings and 3-4
    answer variants, sampled and shuffled deterministically. Every arithmetic
    and unit-conversion answer is *computed*, so the training data is never
-   wrong. There is no canonical sentence for the model to memorise.
+   wrong. There is no canonical sentence for the model to memorise. About 3,000
+   of the exchanges are "here are some web results, answer the question"
+   examples in the exact layout `orbit_gpt/search.py` produces, which is what
+   lets it read search results at inference time.
 2. **An epoch cap.** `--max-epochs 8` stops it grinding over the same text
    until it is word-perfect.
 3. **A repetition penalty** (default 1.15) so it does not loop on one word.
@@ -278,6 +297,89 @@ model, tokenizer = load_model("out/orbit")
 
 ---
 
+## 💾 Checkpoints (no Google Drive)
+
+Checkpoints are written to `checkpoints/<name>` — inside the repository when
+you run from a clone, `/content/checkpoints/orbit` when the single-file build
+runs standalone in Colab. **Nothing is ever mounted or written to Google
+Drive**, and `checkpoints/` is in `.gitignore` so a run can never push weights.
+
+```text
+checkpoints/orbit/
+├── model.pt              # best val loss - what inference loads
+├── model-latest.pt       # freshest save  - what --resume auto loads
+├── model-step000750.pt   # periodic snapshots (newest 2 kept)
+├── tokenizer.json        # the tokenizer the weights were trained with
+└── train_config.json     # model + training config, for reproducibility
+```
+
+`model.pt` is written whenever validation loss improves, `model-latest.pt`
+every `--save-interval` steps (250 by default) and at the end of the run, so a
+run that is interrupted can always be picked up again.
+
+```bash
+# resume from the newest checkpoint, for 1000 more steps
+python train.py --resume auto --max-steps 3000
+# or from a specific file
+python train.py --resume checkpoints/orbit/model-step000750.pt
+```
+
+Resuming restores the step counter, best loss and history but keeps *your*
+`--max-steps` / `--lr`, so you can carry on with a different budget. If the
+checkpoint's vocabulary does not match the corpus, training says so and starts
+clean instead of crashing on a shape mismatch.
+
+Checkpoints are ~19 MB for `micro` (4.8M params × 4 bytes) — small enough to
+keep around, but too big to sprinkle through git history, so they stay on disk.
+If you really want one in the repo: `python train.py --push-checkpoint`
+(refuses anything over `--push-size-limit` MB, and needs working git
+credentials, which Colab does not have).
+
+---
+
+## 🌐 Web search (optional)
+
+A 5M-parameter model only knows its training text. For anything time-sensitive
+it can read a few search results first:
+
+```text
+You: What are the latest developments in tiny language models?
+
+[Web search enabled]
+Searching for: latest developments in tiny language models
+Found 5 relevant results.
+Generating answer...
+
+Orbit: ...
+```
+
+* **Off by default for ordinary questions.** `orbit_gpt/search.py` only
+  searches when the message asks for current information (latest / today /
+  2026 / price / weather / who won / "search for ..."). "hello", "who made
+  you?" and "explain recursion" never touch the network.
+* **Configurable.** `USE_WEB_SEARCH = True` at the top of
+  `orbit_gpt/search.py`, `use_web_search=True` in the Colab `CONFIG` block,
+  `--no-search` on the command line, `/search on|off` in the chat, or
+  `ORBIT_WEB_SEARCH=0` in the environment.
+* **Bounded.** 5 results by default, ~1200 characters in total, hard-capped to
+  leave room for the question and the answer inside the context window.
+* **Untrusted.** Snippets are cleaned, truncated and fenced as *data*;
+  "ignore previous instructions"-style text is stripped and anything that
+  could open a fake `User:`/`Assistant:` turn is neutralised.
+* **Never fatal.** No package, no network, blocked, timed out or empty —
+  the reason is printed and the model answers normally.
+* **Modular.** `set_provider(fn)` swaps in any backend
+  (`orbit_gpt.search.PROVIDERS` tries `ddgs`, then `duckduckgo_search`, then
+  `googlesearch-python`).
+
+```bash
+pip install ddgs            # the only extra dependency, and only for search
+python generate.py --checkpoint checkpoints/orbit --chat           # search on
+python generate.py --checkpoint checkpoints/orbit --chat --no-search
+```
+
+---
+
 ## 🗂️ Project layout
 
 ```text
@@ -290,6 +392,8 @@ orbit-gpt/
 │   ├── train.py       # AdamW + cosine schedule + AMP + checkpointing
 │   ├── generate.py    # sampling, stop strings, chat REPL
 │   ├── skills.py      # deterministic arithmetic / unit conversions
+│   ├── search.py      # optional web search (pluggable provider)
+│   ├── checkpoints.py # where checkpoints live + resume resolution
 │   └── corpora/
 │       ├── conversation.py         # the generated dialogue corpus (default)
 │       └── orbit_assistant.txt     # small hand-written exchange corpus
@@ -298,9 +402,10 @@ orbit-gpt/
 ├── colab/
 │   ├── orbit_gpt_colab.py         # self-contained single file for Colab
 │   └── OrbitGPT_Colab.ipynb       # ready-made notebook
+├── checkpoints/                   # gitignored: model.pt, model-latest.pt, ...
 ├── tools/build_colab.py           # regenerates the single file from the package
 ├── tools/colab_footer.py          #   ...the Colab entry point it appends
-└── tests/                         # 32 fast tests, no pytest needed
+└── tests/                         # 52 fast tests, no pytest needed
 ```
 
 `colab/orbit_gpt_colab.py` is **generated** from the package by
@@ -326,6 +431,8 @@ the real code.
   effective batch size while cutting memory.
 * **Faster on CPU?** Use the `nano` preset, keep `--block-size 128`, and let
   PyTorch use all cores (`torch.set_num_threads`).
+* **Want the old, tiny model?** `--preset nano` — 0.8M params, still fine for
+  "does the pipeline work" runs.
 
 Run the tests with `python tests/test_smoke.py`.
 
@@ -337,8 +444,9 @@ OrbitGPT is a *toy* by modern standards — it is the "nanoGPT on Shakespeare"
 scale of model, trained for minutes on a few hundred kilobytes of text. It will produce
 recognisable, often charming, frequently wrong text.
 
-**On memorising:** a model this size trained on a small hand-written corpus
-just recites it. That is why the default corpus is *generated* (see below) —
+The default model is `micro`: 4.8M parameters, 384-token context — about 6x
+the old 0.8M default. It is still a toy. **On memorising:** a model this size
+trained on a small hand-written corpus just recites it. That is why the default corpus is *generated* (see below) —
 thousands of phrasings per intent, so there is no single sentence to memorise.
 It still is not a general assistant: it has no world knowledge beyond its
 training text, no memory between sessions, and it will happily be wrong with

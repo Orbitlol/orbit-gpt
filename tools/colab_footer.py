@@ -15,37 +15,47 @@ def load_source(source, cache_dir=DEFAULT_CACHE_DIR, verbose=True):  # noqa: F81
 
 
 # ---------------------------------------------------------------------------
-# Train once, reuse forever
+# Setup helpers
 # ---------------------------------------------------------------------------
-def mount_drive():
-    """Mount Google Drive so the checkpoint survives a Colab session restart."""
-    try:
-        from google.colab import drive
+def install_dependencies(packages=("ddgs",)):
+    """Install the optional pip packages we can live without.
 
-        drive.mount("/content/drive", force_remount=False)
-        path = Path("/content/drive/MyDrive/orbit-gpt")
-        path.mkdir(parents=True, exist_ok=True)
-        print("google drive mounted: " + str(path))
-        return path
-    except Exception as exc:
-        print("(google drive unavailable: %s)" % exc)
-        print("  -> the model will only live for this session")
-        return None
+    PyTorch is expected to be present (Colab ships it); everything else is
+    best-effort - if it fails the run continues with that feature switched off.
+    """
+    import subprocess
 
-
-def find_checkpoint(*dirs):
-    """First directory holding both a model and its tokenizer, else None."""
-    for d in dirs:
-        d = Path(d)
-        if (d / "model.pt").exists() and (d / "tokenizer.json").exists():
-            return d
-    return None
+    for package in packages:
+        try:
+            __import__(package)
+            continue
+        except Exception:
+            pass
+        try:
+            print(f"installing {package} ...")
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", package],
+                check=True, timeout=300,
+            )
+        except Exception as exc:
+            print(f"  ! could not install {package} ({exc}) - continuing without it")
 
 
 def pick_preset(preset, device):
-    if preset != "auto":
+    if preset not in (None, "", "auto"):
         return preset
-    return "micro" if device.type == "cuda" else "nano"
+    return "micro" if device.type == "cuda" else DEFAULT_PRESET
+
+
+def describe_checkpoints(directory):
+    """One line per checkpoint file, so it is obvious what is on disk."""
+    directory = Path(directory)
+    if not directory.is_dir():
+        return "  (none yet)"
+    lines = []
+    for path in sorted(directory.glob("*.pt")):
+        lines.append(f"  {path.name:24s} {path.stat().st_size/1e6:6.1f} MB")
+    return "\n".join(lines) if lines else "  (none yet)"
 
 
 def main(argv=None) -> int:
@@ -63,13 +73,16 @@ def main(argv=None) -> int:
     p.add_argument("--lr", type=float, default=CONFIG["learning_rate"])
     p.add_argument("--dropout", type=float, default=CONFIG["dropout"])
     p.add_argument("--seed", type=int, default=CONFIG["seed"])
-    p.add_argument("--out-dir", default=CONFIG["out_dir"])
+    p.add_argument("--out-dir", default=CONFIG["out_dir"],
+                   help='"" = auto: <repo>/checkpoints/orbit, or '
+                        "/content/checkpoints/orbit in Colab")
     p.add_argument("--device", default="auto")
     p.add_argument("--retrain", action="store_true",
                    help="train from scratch even if a saved model exists")
-    p.add_argument("--resume", action="store_true",
-                   help="continue training the saved model instead of starting over")
-    p.add_argument("--no-drive", action="store_true", help="do not touch Google Drive")
+    p.add_argument("--resume", nargs="?", const="auto", default="",
+                   help="continue training the saved model ('auto' = newest "
+                        "checkpoint in --out-dir)")
+    p.add_argument("--no-search", action="store_true", help="disable web search")
     p.add_argument("--no-chat", action="store_true")
     p.add_argument("--no-sample", action="store_true")
     p.add_argument("--prompt", default="User: Hello!\nAssistant:")
@@ -79,34 +92,39 @@ def main(argv=None) -> int:
     print("  OrbitGPT - train a small language model on your own machine")
     print("=" * 72)
 
+    # 1. dependencies ------------------------------------------------------
+    use_web_search = CONFIG["use_web_search"] and not args.no_search
+    if use_web_search:
+        install_dependencies(("ddgs",))
+
+    # 2. device ------------------------------------------------------------
     device = auto_device(args.device)
     name = pick_preset(args.preset, device)
-    defaults = GPU_DEFAULTS if device.type == "cuda" else CPU_DEFAULTS
     print("device: " + str(device)
           + (" (" + torch.cuda.get_device_name(0) + ")" if device.type == "cuda" else ""))
     print("preset: " + name)
 
-    # ---- where does the model live? -------------------------------------
-    local_dir = Path(args.out_dir)
-    drive_dir = mount_drive() if (CONFIG["save_to_drive"] and not args.no_drive) else None
-    save_dir = (drive_dir / local_dir.name) if drive_dir else local_dir
-    save_dir.mkdir(parents=True, exist_ok=True)
-    existing = find_checkpoint(save_dir, local_dir)
-    retrain = args.retrain or CONFIG["retrain"]
+    # 3. where checkpoints live (never Google Drive) -----------------------
+    out_dir = Path(args.out_dir) if args.out_dir else default_checkpoint_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print("checkpoints: " + str(out_dir))
+    existing = latest_checkpoint(out_dir)
 
+    # 4. reuse, resume, or train -------------------------------------------
+    retrain = args.retrain or CONFIG["retrain"]
     if existing is not None and not retrain and not args.resume:
         print("")
-        print("Found a trained model in " + str(existing))
+        print("Found a trained model: " + str(existing))
         print("Loading it - no waiting. "
               "(--retrain = train a new one, --resume = keep training)")
-        model, tokenizer = load_model(str(existing), device=str(device))
+        model, tokenizer = load_model(str(out_dir), device=str(device))
         print("loaded %.2fM parameters" % (model.n_params / 1e6))
     else:
         if args.resume and existing is not None:
             print("")
             print("Continuing training from " + str(existing))
-            model = GPT.from_checkpoint(str(existing / "model.pt"), device=str(device))
-            tokenizer = load_tokenizer(str(existing))
+            model = GPT.from_checkpoint(str(existing), device=str(device))
+            tokenizer = load_tokenizer(str(out_dir))
             model_config = model.config
         else:
             if existing is not None:
@@ -123,9 +141,13 @@ def main(argv=None) -> int:
                     setattr(model_config, key, value)
             tokenizer = None
 
-        batch_size = args.batch_size or defaults["batch_size"]
-        max_steps = args.max_steps or defaults["max_steps"]
-
+        train_defaults = preset_train_defaults(name, device.type)
+        batch_size = args.batch_size or train_defaults["batch_size"]
+        max_steps = args.max_steps or train_defaults.get("max_steps", 2000)
+        learning_rate = args.lr or train_defaults["learning_rate"]
+        max_epochs = (
+            train_defaults["max_epochs"] if args.max_epochs is None else args.max_epochs
+        )
         print("")
         print("loading corpus: " + args.corpus)
         try:
@@ -133,8 +155,8 @@ def main(argv=None) -> int:
         except Exception as exc:
             # offline / blocked CDN: keep going with the embedded corpus
             print("  ! could not load %r: %s" % (args.corpus, exc))
-            print("  ! falling back to the built-in assistant corpus")
-            text = load_corpus("orbit-chat:20")
+            print("  ! falling back to the generated conversation corpus")
+            text = load_corpus("conversation")
         print("corpus: %s characters" % format(len(text), ","))
         print("")
 
@@ -149,26 +171,31 @@ def main(argv=None) -> int:
             model = GPT(model_config)
 
         # do not grind over the same text until it is memorised
-        if args.max_epochs:
+        if max_epochs:
             per_step = batch_size * model_config.block_size
-            epoch_cap = max(1, math.ceil(dataset.n_train * args.max_epochs / per_step))
+            epoch_cap = max(1, math.ceil(dataset.n_train * max_epochs / per_step))
             if epoch_cap < max_steps:
                 print("capping %d steps at %d (%s epochs over %s tokens)"
-                      % (max_steps, epoch_cap, args.max_epochs,
+                      % (max_steps, epoch_cap, max_epochs,
                          format(dataset.n_train, ",")))
                 max_steps = epoch_cap
 
         train_cfg = TrainConfig(
             batch_size=batch_size,
             max_steps=max_steps,
-            learning_rate=args.lr,
-            warmup_steps=min(100, max(1, max_steps // 10)),
+            learning_rate=learning_rate,
+            min_learning_rate=train_defaults["min_learning_rate"],
+            warmup_steps=train_defaults["warmup_steps"],
+            weight_decay=train_defaults["weight_decay"],
+            grad_clip=train_defaults["grad_clip"],
+            grad_accum_steps=train_defaults["grad_accum_steps"],
             seed=args.seed,
-            out_dir=str(save_dir),
+            out_dir=str(out_dir),
             device=str(device),
-            resume=str(existing / "model.pt") if (args.resume and existing is not None) else "",
+            save_interval=CONFIG["save_interval"],
+            resume=str(existing) if (args.resume and existing is not None) else "",
         )
-        (save_dir / "train_config.json").write_text(json.dumps({
+        (out_dir / "train_config.json").write_text(json.dumps({
             "model_config": model_config.to_dict(),
             "train_config": train_cfg.to_dict(),
             "corpus": args.corpus,
@@ -187,29 +214,27 @@ def main(argv=None) -> int:
                 print("")
                 print(">>> " + prompt)
                 generate(model, tokenizer, prompt, max_new_tokens=100, temperature=temp,
-                         stop_strings=["\nUser:"], device=device, stream=True)
-        try:  # make the checkpoint easy to download from Colab
-            import shutil
-            archive = shutil.make_archive(str(local_dir), "zip", save_dir)
-            print("")
-            print("zipped checkpoint: " + archive)
-            from google.colab import files  # type: ignore
-            files.download(archive)
-        except Exception:
-            pass
+                         stop_strings=["\nUser:"], device=device, stream=True,
+                         repetition_penalty=CONFIG["chat_repetition_penalty"])
 
+    # 5. report where the weights are --------------------------------------
+    print("")
+    print("Checkpoints in " + str(out_dir))
+    print(describe_checkpoints(out_dir))
+
+    # 6. inference (with optional web search) ------------------------------
     if CONFIG["chat_after_train"] and not args.no_chat:
         chat(model, tokenizer, device=device,
              temperature=CONFIG["chat_temperature"],
              max_new_tokens=CONFIG["chat_tokens"],
-             repetition_penalty=CONFIG["chat_repetition_penalty"])
+             repetition_penalty=CONFIG["chat_repetition_penalty"],
+             use_web_search=use_web_search,
+             web_results=CONFIG["web_results"])
 
     print("")
-    print("Model saved in: " + str(save_dir))
-    print("Next time just run this cell again - it loads the saved model instead "
-          "of training.")
-    print("  --retrain   train from scratch")
-    print("  --resume    keep training the saved model")
+    print("Resume training:  %run orbit_gpt_colab.py --resume --max-steps 4000")
+    print("Train again:      %run orbit_gpt_colab.py --retrain")
+    print("Just chat:        %run orbit_gpt_colab.py")
     return 0
 
 

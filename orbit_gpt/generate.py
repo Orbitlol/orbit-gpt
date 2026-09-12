@@ -8,6 +8,7 @@ from typing import List, Optional, Sequence, Tuple
 
 import torch
 
+from orbit_gpt import search as websearch
 from orbit_gpt.model import GPT
 from orbit_gpt.skills import answer_arithmetic
 from orbit_gpt.tokenizer import Tokenizer, load_tokenizer
@@ -168,6 +169,32 @@ def _trim_history(
     return history
 
 
+def _web_prompt(
+    question: str,
+    results,
+    model: GPT,
+    tokenizer: Tokenizer,
+    max_new_tokens: int,
+):
+    """Build a search-augmented prompt that always leaves room for the answer.
+
+    The web block is capped in characters and then checked with the real
+    tokenizer; if it still does not fit, it is shrunk, and if even the bare
+    question does not fit we return ``None`` and let the normal (trimmed)
+    prompt path deal with it.
+    """
+    block_size = model.config.block_size
+    reserve = min(max_new_tokens + 24, max(32, block_size // 2))
+    budget = max(150, int((block_size - reserve) * 3.0))
+    prompt = websearch.augment_prompt(question, results, max_chars=budget)
+    while len(tokenizer.encode(prompt)) > block_size - reserve and budget > 150:
+        budget = int(budget * 0.6)
+        prompt = websearch.augment_prompt(question, results, max_chars=budget)
+    if len(tokenizer.encode(prompt)) > block_size - reserve:
+        return None
+    return prompt
+
+
 def chat(
     model: GPT,
     tokenizer: Tokenizer,
@@ -182,13 +209,27 @@ def chat(
     stop_strings: Sequence[str] = DEFAULT_STOP_STRINGS,
     repetition_penalty: float = 1.15,
     use_skills: bool = True,
+    use_web_search: Optional[bool] = None,
+    web_results: int = 5,
 ) -> None:
-    """A tiny REPL: type a message, get an answer, repeat."""
+    """A tiny REPL: type a message, get an answer, repeat.
+
+    ``use_web_search=None`` follows :data:`orbit_gpt.search.USE_WEB_SEARCH`;
+    it can be flipped at run time with ``/search on`` / ``/search off``.
+    """
     device = device or next(model.parameters()).device
+    if use_web_search is None:
+        use_web_search = websearch.USE_WEB_SEARCH
     history: List[Tuple[str, str]] = []
+    search_state = (
+        "on" if use_web_search and websearch.available()
+        else "on, but no backend (pip install ddgs)" if use_web_search
+        else "off"
+    )
     print(
         "\nOrbit is ready. Type a message and press Enter. "
-        "Commands: /reset, /temp 0.8, /tokens 200, /rep 1.2, /quit\n"
+        "Commands: /reset, /temp 0.8, /tokens 200, /rep 1.2, /search off, /quit\n"
+        f"Web search: {search_state}\n"
     )
     while True:
         try:
@@ -231,6 +272,20 @@ def chat(
                 pass
             print(f"(max_new_tokens = {max_new_tokens})")
             continue
+        if user.lower().startswith("/search"):
+            parts = user.split(None, 1)
+            arg = parts[1].strip().lower() if len(parts) > 1 else "status"
+            if arg in ("on", "true", "1", "yes", "enable"):
+                use_web_search = True
+            elif arg in ("off", "false", "0", "no", "disable"):
+                use_web_search = False
+            print(
+                f"(web search = {'on' if use_web_search else 'off'}"
+                + ("" if not use_web_search or websearch.available()
+                   else " - no backend installed, run: pip install ddgs")
+                + ")"
+            )
+            continue
 
         history.append(("User", user))
         if use_skills:
@@ -242,9 +297,34 @@ def chat(
                 history.append(("Assistant", exact))
                 history = history[-max_turns:]
                 continue
-        # keep the prompt (plus room for the answer) inside the context window
-        history = _trim_history(history, tokenizer, model.config.block_size, preamble)
-        prompt = format_chat(history, preamble)
+        # ---- optional web search ----------------------------------------
+        # Only for questions that want fresh information; failures are
+        # reported and the model falls back to answering on its own.
+        prompt = None
+        sources = None
+        if use_web_search and websearch.needs_search(user):
+            print("[Web search enabled]")
+            query = websearch.build_query(user)
+            print(f"Searching for: {query}")
+            results = websearch.search_web(query, max_results=web_results)
+            if results:
+                print(f"Found {len(results)} relevant results.")
+                sources = results
+                prompt = _web_prompt(
+                    user, results, model, tokenizer, max_new_tokens
+                )
+            else:
+                print(
+                    f"(web search unavailable: {websearch.last_error()} - "
+                    "answering without it)"
+                )
+            if prompt:
+                print("Generating answer...")
+
+        if prompt is None:
+            # keep the prompt (plus room for the answer) inside the context window
+            history = _trim_history(history, tokenizer, model.config.block_size, preamble)
+            prompt = format_chat(history, preamble)
         print("Orbit: ", end="", flush=True)
         answer = generate(
             model,
@@ -261,6 +341,12 @@ def chat(
             repetition_penalty=repetition_penalty,
         )
         answer = answer.strip()
+        if answer and sources:
+            # the model is small: always show where the claim came from, so a
+            # paraphrase that drifted can be checked against the snippets
+            print("\nSources:")
+            for i, r in enumerate(sources, start=1):
+                print(f"  [{i}] {r.title}" + (f" - {r.url}" if r.url else ""))
         if not answer:
             print(
                 "(no room left in the context window - try /reset, or train with a "

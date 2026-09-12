@@ -25,6 +25,8 @@ MODULES = [
     ("tokenizer (byte-level BPE, pure Python)", ROOT / "orbit_gpt" / "tokenizer.py"),
     ("model (GPT transformer)", ROOT / "orbit_gpt" / "model.py"),
     ("data (corpora + batching)", ROOT / "orbit_gpt" / "data.py"),
+    ("optional web search", ROOT / "orbit_gpt" / "search.py"),
+    ("checkpoint locations", ROOT / "orbit_gpt" / "checkpoints.py"),
     ("generated conversation corpus", ROOT / "orbit_gpt" / "corpora" / "conversation.py"),
     ("deterministic arithmetic skill", ROOT / "orbit_gpt" / "skills.py"),
     ("training loop", ROOT / "orbit_gpt" / "train.py"),
@@ -55,23 +57,25 @@ edit the package, not this file.
 CONFIG = dict(
     # ---- what to learn -------------------------------------------------
     corpus="conversation",  # generated dialogue corpus | builtin | file | folder | URL
-    preset="auto",        # auto|nano|micro|mini|small|base  (auto: micro on GPU)
+    preset="micro",       # nano|micro|mini|small|base  (micro = 4.8M params)
     vocab_size=2048,      # BPE vocabulary size
     block_size=None,      # context length (None = preset default)
     n_layer=None, n_head=None, n_embd=None,   # override the preset if you like
     batch_size=None,      # None = auto for your hardware
-    max_steps=None,       # None = auto (2000 on both GPU and CPU)
-    max_epochs=8,         # never train more than this many passes over the corpus
-    learning_rate=2e-3,
+    max_steps=None,       # None = auto (2000)
+    max_epochs=None,      # None = the preset default (8)
+    learning_rate=None,   # None = the preset default
     dropout=0.1,
     seed=1337,
-    # ---- train once, reuse forever -------------------------------------
-    # On Colab the model is saved to Google Drive, so it survives session
-    # restarts: the next run finds it, loads it, and starts chatting in
-    # seconds instead of training again.
-    out_dir="/content/orbit_model" if __import__("os").path.exists("/content") else "out/orbit",
-    save_to_drive=True,   # Colab only: keep the checkpoint in MyDrive/orbit-gpt
+    # ---- checkpoints (Google Drive is never used) -----------------------
+    # "" = automatic: <repo>/checkpoints/orbit, or /content/checkpoints/orbit
+    # when this file runs standalone in Colab.
+    out_dir="",
+    save_interval=250,    # also write model-latest.pt every N steps
     retrain=False,        # True = ignore the saved model and train again
+    # ---- inference ------------------------------------------------------
+    use_web_search=True,  # False (or --no-search) = never touch the network
+    web_results=5,        # how many search results to put in the prompt
     sample_after_train=True,
     chat_after_train=True,
     chat_temperature=0.7,
@@ -96,7 +100,7 @@ import urllib.request
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 try:
     import torch
@@ -109,19 +113,67 @@ except ImportError:  # pragma: no cover
 FOOTER = (Path(__file__).parent / "colab_footer.py").read_text(encoding="utf-8")
 
 
+# Names that are allowed to appear in more than one module of the single-file
+# build.  ``load_source`` is deliberately replaced by the footer; ``__all__``
+# is inert once everything lives in one namespace.
+ALLOWED_COLLISIONS = {"load_source", "_original_load_source", "__all__", "main"}
+
+
+def top_level_names(source: str) -> set:
+    """Every name a module defines at the top level."""
+    import ast
+
+    names = set()
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
+
+
+def check_for_collisions(bodies, footer_source: str) -> None:
+    """The build flattens every module into ONE namespace: a shared name means
+    the later module silently replaces the earlier one's function or table."""
+    from collections import defaultdict
+
+    owners: dict = defaultdict(set)
+    for title, body in bodies.items():
+        for name in top_level_names(body):
+            owners[name].add(title)
+    for name in top_level_names(footer_source):
+        owners[name].add("<footer>")
+
+    clashes = {
+        name: sorted(titles)
+        for name, titles in owners.items()
+        if len(titles) > 1 and name not in ALLOWED_COLLISIONS
+    }
+    if clashes:
+        detail = "; ".join(f"{n} in {', '.join(t)}" for n, t in sorted(clashes.items()))
+        raise SystemExit(
+            "the single-file build flattens all modules, so these names clash: "
+            f"{detail}\nRename them in the package and rebuild."
+        )
+
+
 def strip_imports(source: str) -> str:
     """Drop top-level import statements (the merged header provides them)."""
     lines = source.splitlines()
     out, skipping = [], False
     for line in lines:
         if skipping:
-            skipping = line.rstrip().endswith("\\") or not line.strip()
-            if not line.strip():
+            # end of "from x import (a,\n b,\n)" - or of a "\" continuation
+            if line.split("#", 1)[0].rstrip().endswith(("\\", ")", "]")):
                 skipping = False
             continue
         if re.match(r"^(import |from )\S", line):
-            # multi-line "from x import (\n a,\n b,\n)" -> skip until ")"
-            if line.rstrip().endswith("("):
+            stripped = line.split("#", 1)[0].rstrip()
+            if stripped.endswith("\\") or stripped.count("(") > stripped.count(")"):
                 skipping = True
             continue
         out.append(line)
@@ -130,10 +182,13 @@ def strip_imports(source: str) -> str:
 
 def main() -> int:
     parts = [HEADER]
+    bodies = {}
     for title, path in MODULES:
         body = strip_imports(path.read_text(encoding="utf-8"))
+        bodies[title] = body
         banner = f"\n\n# {'=' * 68}\n# {title}\n# {'=' * 68}\n"
         parts.append(banner + "\n" + body)
+    check_for_collisions(bodies, FOOTER)
     corpus = (ROOT / "orbit_gpt" / "corpora" / "orbit_assistant.txt").read_text(encoding="utf-8")
     assert '"""' not in corpus and "\\" not in corpus, "corpus must be raw-string safe"
     parts.append(FOOTER.replace("@@CHAT_CORPUS@@", corpus))
