@@ -21,7 +21,12 @@ jobs:
       - name: Lint
         run: |
           pip install pyflakes
-          python -m pyflakes orbit_gpt/*.py *.py tools/*.py tests/*.py
+          # tools/colab_footer.py is a template fragment that is appended to
+          # the single-file build, not an importable module: it uses names
+          # (CONFIG, load_source, argparse...) that the generated header
+          # defines, so pyflakes would flag every one of them.
+          python -m pyflakes orbit_gpt/*.py orbit_gpt/corpora/*.py *.py \
+            $(find tools -name '*.py' ! -name 'colab_footer.py') tests/*.py
 
       - name: Tests
         run: python tests/test_smoke.py
