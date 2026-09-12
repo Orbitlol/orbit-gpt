@@ -1,0 +1,3 @@
+# OrbitGPT has exactly one hard dependency: PyTorch.
+# (numpy is optional - only some PyTorch builds warn without it)
+torch>=2.0

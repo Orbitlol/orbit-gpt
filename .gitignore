@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# training output and checkpoints (<repo>/checkpoints/<name>)
+out/
+checkpoints/
+*.pt
+*.pth
+*.zip
+
+# downloaded corpora cache (kept out of git; ~/.cache/orbit-gpt by default)
+/data/
+!orbit_gpt/corpora/
+
+.venv/
+venv/
+.ipynb_checkpoints/
+.DS_Store
