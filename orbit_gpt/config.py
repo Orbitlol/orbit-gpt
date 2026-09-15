@@ -63,7 +63,8 @@ class TrainConfig:
     seed: int = 1337
     num_workers: int = 0
     out_dir: str = "out"
-    resume: str = ""
+    resume: str = ""        # continue a run: weights + step + schedule
+    init_from: str = ""     # fine-tune (SFT): weights only, fresh step count
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -111,21 +112,23 @@ DEFAULT_PRESET = "micro"
 # place to tune the run: --lr/--batch-size/... on the CLI override them.
 # ---------------------------------------------------------------------------
 PRESET_TRAIN: Dict[str, Dict[str, Any]] = {
+    # vocab 1024 on nano: the output layer is a third of that model, so a
+    # smaller vocabulary is the cheapest speed-up there is.
     "nano": dict(batch_size=32, grad_accum_steps=1, learning_rate=2e-3,
                  min_learning_rate=2e-4, warmup_steps=100, weight_decay=0.1,
-                 grad_clip=1.0, max_epochs=8),
+                 grad_clip=1.0, max_epochs=8, vocab_size=1024),
     "micro": dict(batch_size=24, grad_accum_steps=1, learning_rate=2e-3,
                   min_learning_rate=2e-4, warmup_steps=200, weight_decay=0.1,
-                  grad_clip=1.0, max_epochs=8),
+                  grad_clip=1.0, max_epochs=8, vocab_size=2048),
     "mini": dict(batch_size=16, grad_accum_steps=2, learning_rate=1.5e-3,
                  min_learning_rate=1.5e-4, warmup_steps=200, weight_decay=0.1,
-                 grad_clip=1.0, max_epochs=8),
+                 grad_clip=1.0, max_epochs=8, vocab_size=2048),
     "small": dict(batch_size=8, grad_accum_steps=4, learning_rate=1e-3,
                   min_learning_rate=1e-4, warmup_steps=300, weight_decay=0.1,
-                  grad_clip=1.0, max_epochs=8),
+                  grad_clip=1.0, max_epochs=8, vocab_size=2048),
     "base": dict(batch_size=4, grad_accum_steps=8, learning_rate=1e-3,
                  min_learning_rate=1e-4, warmup_steps=500, weight_decay=0.1,
-                 grad_clip=1.0, max_epochs=8),
+                 grad_clip=1.0, max_epochs=8, vocab_size=4096),
 }
 
 # Device-specific overrides, applied on top of PRESET_TRAIN.
