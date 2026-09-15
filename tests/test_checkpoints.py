@@ -71,6 +71,35 @@ def test_resolve_resume_understands_auto_and_paths():
         assert resolve_resume(d, str(d / "model-latest.pt")) == d / "model-latest.pt"
 
 
+def test_saved_model_config_is_the_architecture_in_the_file():
+    """``--resume`` has to read ``model_config``; the defaults are a trap.
+
+    Reading the wrong key silently falls back to ``GPTConfig()`` (vocab 1024,
+    block 192), which never matches a real corpus and turns every resume into
+    "starting from scratch".
+    """
+    from orbit_gpt.checkpoints import saved_model_config
+    from orbit_gpt.config import GPTConfig
+    from orbit_gpt.model import GPT
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        GPT(
+            GPTConfig(vocab_size=777, block_size=64, n_layer=2, n_head=2, n_embd=32)
+        ).save(d / "model.pt")
+
+        stored = saved_model_config(d / "model.pt")
+        assert stored is not None
+        assert stored["vocab_size"] == 777
+        assert stored["block_size"] == 64
+        assert saved_model_config(d)["vocab_size"] == 777   # a directory works
+        assert GPTConfig().vocab_size != 777               # ... and differs from it
+
+        assert saved_model_config(d / "missing.pt") is None
+        (d / "bare.pt").write_bytes(b"not a checkpoint")
+        assert saved_model_config(d / "bare.pt") is None
+
+
 def test_keep_last_n_deletes_old_snapshots():
     from orbit_gpt.checkpoints import keep_last_n, step_name
 

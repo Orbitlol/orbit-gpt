@@ -25,6 +25,7 @@ from orbit_gpt.checkpoints import (
     default_checkpoint_dir,
     human_size,
     resolve_resume,
+    saved_model_config,
 )
 from orbit_gpt.config import (
     DEFAULT_PRESET,
@@ -228,13 +229,17 @@ def main(argv=None) -> int:
         print(f"! --resume {args.resume}: no such checkpoint, starting from scratch")
     if resume_path is not None:
         # the checkpoint knows the architecture; the preset only fills gaps
-        saved = GPTConfig.from_dict(
-            torch.load(resume_path, map_location="cpu").get("config", {})
-        )
-        if saved.vocab_size == tokenizer.vocab_size:
+        saved_config = saved_model_config(resume_path)
+        saved = GPTConfig.from_dict(saved_config or {})
+        if saved_config and saved.vocab_size == tokenizer.vocab_size:
             model_config = saved
             print(f"resuming from {resume_path} -> using its architecture "
                   f"({saved.n_layer}L/{saved.n_head}H/{saved.n_embd}d)")
+        elif not saved_config:
+            # an old or hand-written checkpoint: keep the preset architecture
+            # and let the weights load into it
+            print(f"resuming from {resume_path} -> no architecture stored, "
+                  f"keeping the {preset_name} one")
         else:
             print(
                 f"! {resume_path} has vocab {saved.vocab_size} but the corpus "

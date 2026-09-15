@@ -1801,6 +1801,7 @@ __all__ = [
     "resolve_resume",
     "keep_last_n",
     "human_size",
+    "saved_model_config",
 ]
 
 DEFAULT_NAME = "orbit"
@@ -1873,6 +1874,32 @@ def resolve_resume(out_dir, resume: str = "") -> Optional[Path]:
     if path.is_dir():
         return latest_checkpoint(path)
     return path if path.exists() else None
+
+
+def saved_model_config(path) -> Optional[dict]:
+    """The architecture stored inside a checkpoint, or ``None``.
+
+    ``GPT.save`` writes it under ``"model_config"``; a few older files used
+    ``"config"``, so both are accepted.  ``--resume`` needs this to reload the
+    checkpoint with the architecture it was trained with instead of the
+    :class:`~orbit_gpt.config.GPTConfig` defaults.
+    """
+    path = Path(path)
+    if path.is_dir():
+        path = path / BEST_NAME
+    try:
+        import torch
+
+        ckpt = torch.load(path, map_location="cpu")
+    except Exception:
+        return None
+    if not isinstance(ckpt, dict):
+        return None
+    for key in ("model_config", "config"):
+        stored = ckpt.get(key)
+        if isinstance(stored, dict) and stored:
+            return dict(stored)
+    return None
 
 
 def keep_last_n(directory, pattern: str = "model-step*.pt", n: int = KEEP_STEP_CHECKPOINTS) -> None:
