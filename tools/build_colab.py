@@ -28,7 +28,6 @@ MODULES = [
     ("optional web search", ROOT / "orbit_gpt" / "search.py"),
     ("checkpoint locations", ROOT / "orbit_gpt" / "checkpoints.py"),
     ("generated conversation corpus", ROOT / "orbit_gpt" / "corpora" / "conversation.py"),
-    ("generated prose corpus (stage 1)", ROOT / "orbit_gpt" / "corpora" / "prose.py"),
     ("deterministic arithmetic skill", ROOT / "orbit_gpt" / "skills.py"),
     ("training loop", ROOT / "orbit_gpt" / "train.py"),
     ("generation + chat", ROOT / "orbit_gpt" / "generate.py"),
@@ -57,37 +56,23 @@ edit the package, not this file.
 # ---------------------------------------------------------------------------
 CONFIG = dict(
     # ---- what to learn -------------------------------------------------
+    corpus="conversation",  # generated dialogue corpus | builtin | file | folder | URL
     preset="micro",       # nano|micro|mini|small|base  (micro = 4.8M params)
-    vocab_size=None,      # None = the preset default (1024 nano / 2048 micro)
+    vocab_size=2048,      # BPE vocabulary size
     block_size=None,      # context length (None = preset default)
     n_layer=None, n_head=None, n_embd=None,   # override the preset if you like
     batch_size=None,      # None = auto for your hardware
     max_steps=None,       # None = auto (2000)
-    seed=1337,
-
-    # ---- supervised fine-tuning (two stages, one run) -------------------
-    # Stage 1 teaches sentence structure on plain prose, stage 2 teaches the
-    # User:/Assistant: chat format.  Skipping stage 1 is what makes a tiny
-    # model sound like word salad.
-    pretrain_corpus="prose",      # stage 1 corpus (generated, offline)
-    pretrain_epochs=2,            # passes over the prose
-    pretrain_fraction=0.4,        # share of the step budget for stage 1
-    pretrain_steps=None,          # or set it directly
-    sft_corpus="conversation",    # stage 2 corpus (generated, offline)
-    sft_epochs=8,                 # cap so it does not memorise the dialogues
-    sft_steps=None,               # or set it directly
-    sft_lr=None,                  # None = preset lr / 3
-    weight_decay=0.1,
-    grad_clip=1.0,
+    max_epochs=None,      # None = the preset default (8)
+    learning_rate=None,   # None = the preset default
     dropout=0.1,
-
+    seed=1337,
     # ---- checkpoints (Google Drive is never used) -----------------------
     # "" = automatic: <repo>/checkpoints/orbit, or /content/checkpoints/orbit
     # when this file runs standalone in Colab.
     out_dir="",
     save_interval=250,    # also write model-latest.pt every N steps
     retrain=False,        # True = ignore the saved model and train again
-
     # ---- inference ------------------------------------------------------
     use_web_search=True,  # False (or --no-search) = never touch the network
     web_results=5,        # how many search results to put in the prompt

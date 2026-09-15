@@ -53,7 +53,7 @@ BUILTIN_DATASETS: Dict[str, Path] = {
 # Generated on the fly (see orbit_gpt/corpora/conversation.py): a large, varied
 # dialogue corpus.  This is the default because it is the only corpus big and
 # varied enough that a small model has to generalise instead of memorise.
-GENERATED_DATASETS = ("conversation", "prose")
+GENERATED_DATASETS = ("conversation",)
 
 USER_AGENT = "orbit-gpt/0.1 (+https://github.com/Orbitlol/orbit-gpt)"
 
@@ -68,10 +68,6 @@ def generated_corpus(name: str) -> str:
         from orbit_gpt.corpora.conversation import build_conversation_corpus
 
         return build_conversation_corpus()
-    if name == "prose":
-        from orbit_gpt.corpora.prose import build_prose_corpus
-
-        return build_prose_corpus()
     raise KeyError(f"unknown generated corpus {name!r}")
 
 

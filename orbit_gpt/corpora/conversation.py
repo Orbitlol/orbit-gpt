@@ -857,12 +857,12 @@ _CONTEXT_TOPICS = (
 
 def build_conversation_corpus(
     seed: int = 1337,
-    n_arithmetic: int = 8000,
-    n_conversions: int = 3000,
-    n_facts: int = 9000,
-    n_social: int = 7000,
-    n_dialogues: int = 5000,
-    n_context: int = 4000,
+    n_arithmetic: int = 12000,
+    n_conversions: int = 4000,
+    n_facts: int = 15000,
+    n_social: int = 12000,
+    n_dialogues: int = 8000,
+    n_context: int = 6000,
     max_addend: int = 99,
 ) -> str:
     """Build a large dialogue corpus.  Same ``seed`` -> same text, every time."""

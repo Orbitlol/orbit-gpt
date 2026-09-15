@@ -9,11 +9,6 @@ checkpoints/
 *.pth
 *.zip
 
-# exported models (built by `python -m orbit_gpt.export`)
-exports/
-*.onnx
-*.onnx.data
-
 # downloaded corpora cache (kept out of git; ~/.cache/orbit-gpt by default)
 /data/
 !orbit_gpt/corpora/

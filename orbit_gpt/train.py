@@ -13,7 +13,6 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
 
 from orbit_gpt.checkpoints import (
@@ -25,12 +24,7 @@ from orbit_gpt.checkpoints import (
 from orbit_gpt.config import GPTConfig, TrainConfig
 from orbit_gpt.data import TokenDataset
 from orbit_gpt.model import GPT
-from orbit_gpt.tokenizer import (
-    BPETokenizer,
-    CharTokenizer,
-    Tokenizer,
-    load_tokenizer,
-)
+from orbit_gpt.tokenizer import BPETokenizer, CharTokenizer, Tokenizer
 
 
 # ---------------------------------------------------------------------------
@@ -128,9 +122,6 @@ class Trainer:
         self.step = 0
         self.start_time = 0.0
 
-        if train_config.init_from:
-            self.init_weights_from(train_config.init_from)
-
     # -- learning rate ----------------------------------------------------
     def get_lr(self, step: int) -> float:
         cfg = self.cfg
@@ -203,31 +194,6 @@ class Trainer:
             print(f"  saved {path.name} (step {self.step})")
         return path
 
-    def init_weights_from(self, path: str) -> None:
-        """Start from a trained checkpoint but with a fresh schedule (SFT).
-
-        Unlike :meth:`load_checkpoint` this keeps ``step`` at 0, so the cosine
-        schedule and warmup run again for the fine-tuning stage.
-        """
-        path = Path(path)
-        if path.is_dir():
-            path = path / "model.pt"
-        ckpt = torch.load(path, map_location=self.device)
-        state = ckpt.get("model_state", ckpt)
-        model_state = self.model.state_dict()
-        # copy every tensor whose shape still matches (a fine-tune may use a
-        # different vocabulary or width, in which case those stay random)
-        usable = {
-            k: v for k, v in state.items()
-            if k in model_state and model_state[k].shape == v.shape
-        }
-        skipped = [k for k in state if k not in usable]
-        model_state.update(usable)
-        self.model.load_state_dict(model_state)
-        if self.verbose:
-            print(f"initialised from {path}: {len(usable)} tensors"
-                  + (f", skipped {len(skipped)} (shape mismatch)" if skipped else ""))
-
     def load_checkpoint(self, path: str) -> None:
         ckpt = torch.load(path, map_location=self.device)
         self.model.load_state_dict(ckpt["model_state"], strict=False)
@@ -274,9 +240,7 @@ class Trainer:
             for group in self.optimizer.param_groups:
                 group["lr"] = lr
 
-            if self.step == cfg.max_steps - 1 or (
-                cfg.eval_interval and self.step % cfg.eval_interval == 0
-            ):
+            if self.step % cfg.eval_interval == 0 or self.step == cfg.max_steps - 1:
                 val_loss = self.estimate_loss()
                 improved = val_loss < self.best_val
                 if improved:
@@ -354,72 +318,7 @@ class Trainer:
 # ---------------------------------------------------------------------------
 # convenience: build everything from raw text
 # ---------------------------------------------------------------------------
-def _cache_key(text: str, kind: str, vocab_size: int) -> str:
-    """A stable key for (corpus text, tokenizer kind, vocab size)."""
-    import hashlib
-
-    digest = hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest()
-    return f"{kind}-{vocab_size}-{digest[:32]}"
-
-
 def build_tokenizer(
-    text: str,
-    kind: str = "bpe",
-    vocab_size: int = 1024,
-    verbose: bool = True,
-    cache_dir=None,
-):
-    """Train a tokenizer, or reload a cached one for the same input.
-
-    Returns ``(tokenizer, token_ids)``; ``token_ids`` is ``None`` when the
-    tokens were not cached and still have to be computed.  Caching matters on
-    slow machines: training the BPE and encoding a 10 MB corpus costs several
-    seconds every single run otherwise.
-    """
-    cache = None
-    if cache_dir is not None:
-        cache = Path(cache_dir) / _cache_key(text, kind, vocab_size)
-        tokenizer_file = cache / "tokenizer.json"
-        tokens_file = cache / "tokens.npy"
-        if tokenizer_file.exists():
-            try:
-                tok = load_tokenizer(str(cache))
-                if verbose:
-                    print(f"reusing cached tokenizer ({cache.parent.name}/"
-                          f"{cache.name})")
-                ids = None
-                if tokens_file.exists():
-                    ids = [int(i) for i in np.load(tokens_file)]
-                    if verbose:
-                        print(f"reusing cached tokens: {len(ids):,}")
-                return tok, ids
-            except Exception as exc:  # corrupt cache - just rebuild it
-                if verbose:
-                    print(f"(ignoring unreadable cache: {exc})")
-
-    tok = _train_tokenizer(text, kind, vocab_size, verbose)
-    if cache is not None:
-        try:
-            cache.mkdir(parents=True, exist_ok=True)
-            tok.save(str(cache))
-        except Exception:
-            pass
-    return tok, None
-
-
-def save_tokens(ids, text: str, kind: str, vocab_size: int, cache_dir) -> None:
-    """Store the encoded corpus next to its cached tokenizer."""
-    if cache_dir is None:
-        return
-    try:
-        cache = Path(cache_dir) / _cache_key(text, kind, vocab_size)
-        cache.mkdir(parents=True, exist_ok=True)
-        np.save(cache / "tokens.npy", np.asarray(ids, dtype=np.int32))
-    except Exception:
-        pass
-
-
-def _train_tokenizer(
     text: str, kind: str = "bpe", vocab_size: int = 1024, verbose: bool = True
 ) -> Tokenizer:
     t0 = time.time()
@@ -448,14 +347,8 @@ def train_from_text(
 ) -> Tuple[GPT, Tokenizer, Dict[str, float]]:
     """Tokenize ``text`` and train a model end to end in one call."""
     if tokenizer is None:
-        tokenizer, cached_ids = build_tokenizer(
-            text, tokenizer_kind, vocab_size, verbose
-        )
-        if cached_ids is None:
-            cached_ids = tokenizer.encode(text)
-    else:
-        cached_ids = None
-    ids = cached_ids if cached_ids is not None else tokenizer.encode(text)
+        tokenizer = build_tokenizer(text, tokenizer_kind, vocab_size, verbose)
+    ids = tokenizer.encode(text)
     if verbose:
         print(f"tokenized corpus: {len(ids):,} tokens")
     dataset = TokenDataset(ids, val_fraction=train_config.val_fraction)
