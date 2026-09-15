@@ -207,6 +207,33 @@ class Trainer:
         if self.verbose:
             print(f"resumed from {path} (step {self.step}, val {self.best_val:.4f})")
 
+    def init_weights_from(self, path: str) -> None:
+        """Load weights from a checkpoint, skipping mismatched tensors.
+        
+        This is used for --init-from: it keeps what fits instead of crashing.
+        Unlike --resume, it does not restore training progress (step, best_val, etc.).
+        """
+        ckpt = torch.load(path, map_location=self.device)
+        source_state = ckpt["model_state"]
+        target_state = self.model.state_dict()
+        
+        # Load only tensors that match in shape
+        loaded = 0
+        skipped = 0
+        for key in source_state:
+            if key in target_state:
+                if source_state[key].shape == target_state[key].shape:
+                    target_state[key] = source_state[key]
+                    loaded += 1
+                else:
+                    skipped += 1
+            else:
+                skipped += 1
+        
+        self.model.load_state_dict(target_state, strict=False)
+        if self.verbose:
+            print(f"initialized weights from {path} ({loaded} tensors, {skipped} skipped)")
+
     # -- main loop --------------------------------------------------------
     def train(self) -> Dict[str, float]:
         cfg = self.cfg
