@@ -193,6 +193,42 @@ onnx ok: 8 steps, max |onnx - torch| = 0.00001
 
 ---
 
+## 🦙 GGUF: run it in llama.cpp, Ollama or LM Studio
+
+The same checkpoint exports to **GGUF** with the architecture llama.cpp expects
+for a GPT-2 style model (`gpt2`), so the tiny model drops straight into any
+llama.cpp-compatible runtime:
+
+```bash
+pip install gguf
+python tools/export_gguf.py checkpoints/orbit --out exports/orbit-micro.gguf --quantize q8_0 --check
+```
+
+```text
+wrote exports/orbit-micro.gguf (7.6 MB, q8_0, 39 tensors, 2048 tokens, 1790 merges)
+  tensors: 39 compared, worst |gguf - torch| = 8.31e-04
+  logits : 14 tokens, max |numpy(gguf) - torch| = 3.03e-02 | top-1: torch 442, gguf 442 (same)
+  vocab  : 2048 tokens (2 special + 256 bytes + 1790 merges)
+```
+
+`--quantize f32|f16|q8_0|q4_0` picks the precision; the embeddings, the
+LayerNorms and the position embeddings always stay at full precision, because
+quantising those costs far more quality than it saves space. `--check` reads the
+file back, compares every tensor against PyTorch and then runs a forward pass
+built *only from the GGUF data*, so a transposed matrix cannot slip through.
+
+```bash
+# llama.cpp
+./llama-cli -m exports/orbit-micro.gguf -p "User: What is recursion?\nAssistant:"
+# Ollama: write a Modelfile with `FROM ./exports/orbit-micro.gguf`, then `ollama create orbit`
+```
+
+The vocabulary is byte-level BPE with two control tokens (`<|pad|>`,
+`<|endoftext|>`), the 256 byte tokens and the learned merges. llama.cpp's own
+`gpt2` pre-tokeniser splits words slightly differently from this project's (its
+regex vs `orbit_gpt/tokenizer.py`), so for byte-exact prompt ids use
+`python generate.py`, or the ONNX export above.
+
 ---
 
 ## ⚙️ Why it is cheap to train
@@ -484,8 +520,9 @@ orbit-gpt/
 ├── checkpoints/                   # gitignored: model.pt, model-latest.pt, ...
 ├── exports/                       # gitignored: the ONNX app bundle
 ├── tools/build_colab.py           # regenerates the single file from the package
+├── tools/export_gguf.py           # GGUF export for llama.cpp / Ollama / LM Studio
 ├── tools/colab_footer.py          #   ...the Colab entry point it appends
-└── tests/                         # 59 fast tests, no pytest needed
+└── tests/                         # 61 fast tests, no pytest needed
 ```
 
 `colab/orbit_gpt_colab.py` is **generated** from the package by
