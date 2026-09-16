@@ -25,6 +25,7 @@ from orbit_gpt.checkpoints import (
     default_checkpoint_dir,
     human_size,
     resolve_resume,
+    saved_model_config,
 )
 from orbit_gpt.config import (
     DEFAULT_PRESET,
@@ -37,7 +38,13 @@ from orbit_gpt.data import DEFAULT_CACHE_DIR, TokenDataset, load_corpus, list_da
 from orbit_gpt.config import GPTConfig
 from orbit_gpt.generate import generate
 from orbit_gpt.model import GPT
-from orbit_gpt.train import Trainer, auto_device, build_tokenizer, set_seed
+from orbit_gpt.train import (
+    Trainer,
+    auto_device,
+    build_tokenizer,
+    save_tokens,
+    set_seed,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,7 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     d.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
     d.add_argument("--tokenizer", choices=("bpe", "char"), default="bpe")
-    d.add_argument("--vocab-size", type=int, default=2048)
+    d.add_argument("--vocab-size", type=int, default=None,
+                   help="None = the preset default (1024 for nano, 2048 above)")
     d.add_argument("--val-fraction", type=float, default=0.1)
     d.add_argument("--no-shuffle", action="store_true",
                    help="keep repeated copies of a corpus in the same order")
@@ -98,6 +106,11 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--save-interval", type=int, default=250,
                    help="also write model-latest.pt every N steps (0 = only "
                         "on improvement and at the end)")
+    e.add_argument("--init-from", default="",
+                   help="fine-tune (SFT) from this checkpoint directory: keeps "
+                        "its weights and tokenizer, starts a fresh schedule")
+    e.add_argument("--no-cache", action="store_true",
+                   help="do not reuse the cached tokenizer/tokens")
     e.add_argument("--resume", default="",
                    help="path to a checkpoint, or 'auto' for the newest one "
                         "in --out-dir")
@@ -148,6 +161,7 @@ def main(argv=None) -> int:
     grad_clip = td["grad_clip"] if args.grad_clip is None else args.grad_clip
     grad_accum = td["grad_accum_steps"] if args.grad_accum is None else args.grad_accum
 
+    vocab_size = args.vocab_size or td["vocab_size"]
     print(f"OrbitGPT | preset={preset_name} device={device}")
     print(
         f"  lr={learning_rate:g} warmup={warmup_steps} batch={batch_size}"
@@ -159,10 +173,49 @@ def main(argv=None) -> int:
     )
     print(f"corpus: {len(text):,} characters\n")
 
-    tokenizer = build_tokenizer(text, args.tokenizer, args.vocab_size)
-    ids = tokenizer.encode(text)
-    print(f"tokenized: {len(ids):,} tokens")
+    init_dir = Path(args.init_from) if args.init_from else None
+    cache = None if args.no_cache else Path(args.cache_dir)
+    if init_dir is not None:
+        # stage 2 (SFT): reuse stage 1's tokenizer so the vocab matches
+        from orbit_gpt.tokenizer import load_tokenizer
+
+        tokenizer = load_tokenizer(str(init_dir))
+        ids = tokenizer.encode(text)
+        print(f"tokenizer from {init_dir} (vocab {tokenizer.vocab_size})")
+        print(f"tokenized: {len(ids):,} tokens")
+    else:
+        tokenizer, cached_ids = build_tokenizer(
+            text, args.tokenizer, vocab_size, cache_dir=cache
+        )
+        if cached_ids is None:
+            cached_ids = tokenizer.encode(text)
+            save_tokens(cached_ids, text, args.tokenizer, vocab_size, cache)
+        ids = cached_ids
+        print(f"tokenized: {len(ids):,} tokens")
     dataset = TokenDataset(ids, val_fraction=args.val_fraction)
+
+    model_config.vocab_size = tokenizer.vocab_size
+    if init_dir is not None:
+        # A fine-tune has to reuse the pre-trained architecture, otherwise no
+        # weight matches and we would just be training from scratch.  An
+        # explicit --n-layer/--n-head/--n-embd still wins.
+        ckpt = torch.load(init_dir / "model.pt", map_location="cpu")
+        saved = GPTConfig.from_dict(
+            ckpt.get("model_config") or ckpt.get("config") or {}
+        )
+        if saved.vocab_size == tokenizer.vocab_size and saved.n_layer:
+            model_config = saved
+            for key, value in (
+                ("n_layer", args.n_layer), ("n_head", args.n_head),
+                ("n_embd", args.n_embd), ("block_size", args.block_size),
+                ("dropout", args.dropout),
+            ):
+                if value is not None:
+                    setattr(model_config, key, value)
+            model_config.vocab_size = tokenizer.vocab_size
+            print(f"fine-tuning the architecture from {init_dir} "
+                  f"({model_config.n_layer}L/{model_config.n_head}H/"
+                  f"{model_config.n_embd}d)")
 
     if max_epochs:
         tokens_per_step = batch_size * model_config.block_size * grad_accum
@@ -171,19 +224,22 @@ def main(argv=None) -> int:
             print(f"--max-epochs {max_epochs} -> capping {max_steps} steps to {epoch_cap}")
             max_steps = epoch_cap
 
-    model_config.vocab_size = tokenizer.vocab_size
     resume_path = resolve_resume(args.out_dir, args.resume)
     if args.resume and resume_path is None:
         print(f"! --resume {args.resume}: no such checkpoint, starting from scratch")
     if resume_path is not None:
         # the checkpoint knows the architecture; the preset only fills gaps
-        saved = GPTConfig.from_dict(
-            torch.load(resume_path, map_location="cpu").get("config", {})
-        )
-        if saved.vocab_size == tokenizer.vocab_size:
+        saved_config = saved_model_config(resume_path)
+        saved = GPTConfig.from_dict(saved_config or {})
+        if saved_config and saved.vocab_size == tokenizer.vocab_size:
             model_config = saved
             print(f"resuming from {resume_path} -> using its architecture "
                   f"({saved.n_layer}L/{saved.n_head}H/{saved.n_embd}d)")
+        elif not saved_config:
+            # an old or hand-written checkpoint: keep the preset architecture
+            # and let the weights load into it
+            print(f"resuming from {resume_path} -> no architecture stored, "
+                  f"keeping the {preset_name} one")
         else:
             print(
                 f"! {resume_path} has vocab {saved.vocab_size} but the corpus "
@@ -211,6 +267,7 @@ def main(argv=None) -> int:
         seed=args.seed,
         out_dir=args.out_dir,
         resume=str(resume_path) if resume_path else "",
+        init_from=str(init_dir / "model.pt") if init_dir is not None else "",
     )
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     (Path(args.out_dir) / "train_config.json").write_text(

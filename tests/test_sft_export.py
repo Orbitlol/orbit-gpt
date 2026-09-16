@@ -161,3 +161,68 @@ def test_onnx_export_matches_pytorch():
 
         worst = check_onnx(tmp / "orbit.onnx", tmp, steps=4, tol=1e-3)
         assert worst < 1e-3
+
+
+# ---------------------------------------------------------------------------
+# GGUF export (for llama.cpp / Ollama / LM Studio)
+# ---------------------------------------------------------------------------
+def _gguf_stack() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("gguf") is not None
+
+
+def test_gguf_export_matches_pytorch():
+    """Write a tiny checkpoint as GGUF and read it back: tensors and logits."""
+    if not _gguf_stack():
+        return  # the gguf package is optional; nothing to check
+
+    import numpy as np
+    import torch
+
+    from orbit_gpt.config import GPTConfig
+    from orbit_gpt.model import GPT
+    from orbit_gpt.tokenizer import BPETokenizer
+
+    torch.manual_seed(0)
+    config = GPTConfig(vocab_size=300, block_size=32, n_layer=2, n_head=2, n_embd=32)
+    model = GPT(config).eval()          # eval: the numpy pass has no dropout
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        model.save(tmp / "model.pt")
+        text = ("User: hello there\nAssistant: hello, how can I help? "
+                "Recursion is when a function calls itself. " * 40)
+        BPETokenizer().train(text, vocab_size=300).save(str(tmp))
+
+        import gguf
+
+        from tools.export_gguf import export_gguf, gguf_tensor_names, numpy_forward
+
+        out = tmp / "orbit.gguf"
+        export_gguf(tmp, out, quant="f32", check=True, verbose=False)
+
+        reader = gguf.GGUFReader(str(out))
+        stored = {t.name: np.asarray(t.data, dtype=np.float32) for t in reader.tensors}
+        state = model.state_dict()
+
+        # every block tensor is renamed, and the file carries the whole model
+        names = gguf_tensor_names(state)
+        assert "token_embd.weight" in names.values()
+        assert "blk.1.attn_qkv.weight" in names.values()
+        for ours, name in names.items():
+            assert stored[name].shape == tuple(state[ours].shape), name
+        # plus the zero biases llama.cpp's gpt2 loader asks for
+        extra = set(stored) - set(names.values())
+        assert extra == {*("blk.%d.%s.bias" % (i, part)
+                           for i in range(config.n_layer)
+                           for part in ("attn_norm", "attn_qkv", "attn_output",
+                                        "ffn_norm", "ffn_up", "ffn_down")),
+                         "output_norm.bias"}
+        assert all(np.abs(stored[name]).max() == 0.0 for name in extra)
+
+        # the GGUF data alone reproduces the logits
+        ids = [5, 6, 7, 8, 9, 10]
+        with torch.no_grad():
+            reference = model(torch.tensor([ids]))[0][0, -1].numpy()
+        got = numpy_forward(stored, ids, config.n_head)[-1]
+        assert np.abs(reference - got).max() < 5e-3

@@ -20,77 +20,72 @@ the web before answering when a question needs fresh information.
 
 ---
 
-## ⚡ Google Colab — 60 second quickstart
+## ⚡ Google Colab — two cells, that's the whole procedure
 
 1. Open <https://colab.research.google.com> → **New notebook**
-2. **Runtime → Change runtime type → T4 GPU** (CPU works too, just slower)
-3. Paste this into **one cell** and run it:
+2. **Runtime → Change runtime type → T4 GPU** (CPU also works, ~4× slower)
+3. Paste **cell 1**, run it, paste **cell 2**, run it. Done.
+
+**Cell 1 — setup (once per session, ~20 s)**
 
 ```python
-# OrbitGPT - paste into one Colab cell and run
-import os, urllib.request
-URLS = ["https://raw.githubusercontent.com/Orbitlol/orbit-gpt/main/colab/orbit_gpt_colab.py"]
-if not (os.path.exists("orbit_gpt_colab.py") and os.path.getsize("orbit_gpt_colab.py") > 5000):
-    for url in URLS:
-        try:
-            urllib.request.urlretrieve(url, "orbit_gpt_colab.py"); break
-        except Exception as e:
-            print("download failed:", e)
-print("orbit_gpt_colab.py:", os.path.getsize("orbit_gpt_colab.py"), "bytes")
-%run orbit_gpt_colab.py
+import os
+
+if not os.path.isdir("orbit-gpt"):
+    !git clone -q --depth 1 https://github.com/Orbitlol/orbit-gpt.git
+
+%cd orbit-gpt
+!pip install -q ddgs        # optional: web search. Delete this line to skip.
+print("ready - now run the next cell")
 ```
 
-(`%run` instead of `!python` is deliberate: it runs the file inside the
-notebook kernel, which is what lets the chat box at the end read your typing.)
+**Cell 2 — train, then chat**
 
-That's it. The script prints its progress, shows a couple of samples when it is
-done, saves the model to `/content/checkpoints/orbit`, then drops you into a
-chat box. **No Google Drive is involved.**
-
-**The second time you run the cell it does not train.** It finds the checkpoint,
-loads it and starts chatting in a couple of seconds:
-
-```text
-Checkpoints in /content/checkpoints/orbit
-  model-latest.pt          18.9 MB
-  model.pt                 18.9 MB
-Found a trained model: /content/checkpoints/orbit/model-latest.pt
-Loading it - no waiting. (--retrain = train a new one, --resume = keep training)
+```python
+%run colab/orbit_gpt_colab.py
 ```
+
+That is it. The first run trains and then opens the chat box; **every later run
+finds the checkpoint and goes straight to chatting.** Checkpoints live in
+`/content/checkpoints/orbit` — **never on Google Drive**.
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Orbitlol/orbit-gpt/blob/main/colab/OrbitGPT_2_Cells.ipynb)
+
+`colab/OrbitGPT_2_Cells.ipynb` is that same two-cell notebook, ready to open.
+
+### What happens inside cell 2
+
+| stage | what it learns | why |
+|-------|----------------|-----|
+| 1 — pre-training | ~3.6 MB of generated prose | sentence structure. Skip this and a 5 M-parameter model produces word salad |
+| 2 — SFT | ~48 k `User:`/`Assistant:` exchanges | the chat format, starting from the stage-1 weights |
+
+Then it drops you into chat. Options:
 
 | what you want | how |
 |---------------|-----|
-| just chat with the model I trained earlier | run the cell again (nothing else) |
-| train a fresh model | `%run orbit_gpt_colab.py --retrain` |
-| keep training the saved one longer | `%run orbit_gpt_colab.py --resume --max-steps 4000` |
-| never touch the network | `%run orbit_gpt_colab.py --no-search` |
+| chat with the model I trained earlier | run cell 2 again — nothing else |
+| train a fresh model | `%run colab/orbit_gpt_colab.py --retrain` |
+| keep training the saved one longer | `%run colab/orbit_gpt_colab.py --resume --max-steps 4000` |
+| a bigger model | `%run colab/orbit_gpt_colab.py --preset mini --max-steps 3000` |
+| never touch the network | `%run colab/orbit_gpt_colab.py --no-search` |
+| skip stage 1 (not recommended) | `%run colab/orbit_gpt_colab.py --skip-pretrain` |
 
-(On a local machine the same thing happens in `checkpoints/orbit` inside the
-repository.)
-
-**No download?** Either
-upload `colab/orbit_gpt_colab.py` from this repo into Colab and run
-`!python orbit_gpt_colab.py`, or open
-`colab/OrbitGPT_Colab.ipynb` directly in Colab
-(badge below → *Open in Colab* needs the notebook to be on GitHub).
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Orbitlol/orbit-gpt/blob/main/colab/OrbitGPT_Colab.ipynb)
-
-The single file is **self-contained**: it embeds the built-in assistant corpus
-so it works even with no network access beyond the corpus download, and it
-takes PyTorch as its only dependency. Tweak the `CONFIG` block at the top to
-change the corpus, model size, or chat settings:
+The single file is **self-contained**: it embeds the built-in assistant corpus,
+so it still works offline, and PyTorch is its only real dependency. Tweak the
+`CONFIG` block at the top to change the corpora, model size, or chat settings:
 
 ```python
 CONFIG = dict(
-    corpus="conversation",               # what to learn (generated, no download)
-    preset="micro",                      # nano|micro|mini|small|base  (micro = 4.8M)
-    vocab_size=2048,
-    out_dir="",                          # "" = checkpoints/orbit (never Drive)
-    save_interval=250,                   # also write model-latest.pt every N steps
-    retrain=False,                       # True = ignore the saved model
-    use_web_search=True,                 # False = never touch the network
-    web_results=5,                       # how many results go into the prompt
+    preset="micro",           # nano|micro|mini|small|base  (micro = 4.8M)
+    pretrain_corpus="prose",  # stage 1: plain prose -> sentence structure
+    pretrain_fraction=0.4,    # share of the step budget spent on stage 1
+    sft_corpus="conversation",  # stage 2: the User:/Assistant: format
+    sft_lr=None,              # None = preset lr / 3
+    out_dir="",               # "" = checkpoints/orbit (never Drive)
+    use_web_search=True,      # False = never touch the network
+    web_results=5,
+    chat_repetition_penalty=1.15,   # >1 stops it looping on the same words
     ...
 )
 ```
@@ -102,10 +97,10 @@ clipping, epoch cap) come from `PRESET_TRAIN` in `orbit_gpt/config.py`, so
 It also works as a normal local script:
 
 ```bash
-python colab/orbit_gpt_colab.py --preset micro --corpus ./my_notes.txt
-python colab/orbit_gpt_colab.py            # second run: loads, does not train
-python colab/orbit_gpt_colab.py --retrain  # ignore the saved model, train again
-python colab/orbit_gpt_colab.py --resume   # keep training the saved model
+python colab/orbit_gpt_colab.py             # train (2 stages), then chat
+python colab/orbit_gpt_colab.py             # second run: loads, does not train
+python colab/orbit_gpt_colab.py --retrain   # ignore the saved model, train again
+python colab/orbit_gpt_colab.py --resume    # keep training the saved model
 ```
 
 ---
@@ -150,6 +145,135 @@ window (the `nano` model remembers roughly the last exchange, `micro` a few).
 
 ---
 
+## 📦 Take it home: one small file, no PyTorch
+
+Export the trained model to **ONNX** and run it in a desktop chat window. The
+app needs `onnxruntime` (~15 MB) and nothing else — no PyTorch, no internet.
+
+```bash
+python -m orbit_gpt.export checkpoints/orbit --out exports/orbit.onnx
+pip install onnxruntime
+python orbit_app.py --model exports/orbit-int8.onnx
+```
+
+```text
+$ ls -la exports/
+  orbit.onnx       25.2 MB   fp32 decoder step  (measured, `micro`)
+  orbit-int8.onnx   7.6 MB   8-bit weights      <- the app prefers this one
+  tokenizer.json                the vocabulary it was trained with
+  config.json                   architecture + defaults
+```
+
+`orbit_app.py` opens a small desktop window. Tkinter ships with Python on
+Windows and macOS; on Debian/Ubuntu it is `sudo apt install python3-tk`, and
+without it the app falls back to the terminal automatically.
+`--no-gui` chooses the terminal up front. Add `--check` to the
+export to verify the graph against PyTorch before you ship it:
+
+```text
+$ python -m orbit_gpt.export checkpoints/orbit --out exports/orbit.onnx --check
+wrote exports/orbit.onnx (19.4 MB)
+wrote exports/orbit-int8.onnx (5.1 MB, 3.8x smaller)
+onnx ok: 8 steps, max |onnx - torch| = 0.00001
+```
+
+**How the export stays small and fast**
+
+* the graph is a **single decode step** — one token in, logits out, with the KV
+  cache handed back — so generation costs one small forward pass per token
+  instead of re-running the whole context;
+* 8-bit weight quantisation makes it ~4x smaller with no measurable change in
+  the replies (the `--check` tolerance for int8 is 0.5 logits).
+
+| preset | params | fp32 | int8 | measured on |
+|--------|--------|------|------|-------------|
+| nano   | 0.8 M  | 4.2 MB | 1.5 MB | this repo |
+| micro  | 4.8 M  | 25 MB  | 7.6 MB | this repo |
+| mini   | 6.4 M  | ~32 MB | ~9 MB  | (scales with the parameter count) |
+
+---
+
+## 🦙 GGUF: run it in llama.cpp, Ollama or LM Studio
+
+The same checkpoint exports to **GGUF** with the architecture llama.cpp expects
+for a GPT-2 style model (`gpt2`), so the tiny model drops straight into any
+llama.cpp-compatible runtime:
+
+```bash
+pip install gguf
+python tools/export_gguf.py checkpoints/orbit --out exports/orbit-micro.gguf --quantize q8_0 --check
+```
+
+```text
+wrote exports/orbit-micro.gguf (7.7 MB, q8_0, 76 tensors, 2048 tokens, 1790 merges)
+  tensors: 39 compared, worst |gguf - torch| = 8.31e-04 (+37 zero biases llama.cpp asks for)
+  logits : 14 tokens, max |numpy(gguf) - torch| = 3.03e-02 | top-1: torch 442, gguf 442 (same)
+  vocab  : 2048 tokens (2 special + 256 bytes + 1790 merges)
+```
+
+`--quantize f32|f16|q8_0|q4_0` picks the precision; the embeddings, the
+LayerNorms, the position embeddings and every 1-D tensor (biases) always stay at
+full precision, because quantising those costs far more quality than it saves
+space — and llama.cpp's CPU kernels add biases onto f32 activations directly.
+`--check` reads the file back, compares every tensor against PyTorch and then
+runs a forward pass built *only from the GGUF data*, so a transposed matrix
+cannot slip through.
+
+llama.cpp's `gpt2` loader asks for the LayerNorm and attention/MLP biases that
+the GPT-2 reference implementation has and this model does not, so the export
+writes them as zeros — adding zero is exact, and it is what makes the file load
+instead of failing with `tensor 'output_norm.bias' not found`.
+
+```bash
+# llama.cpp
+./llama-cli -m exports/orbit-micro.gguf -p "User: What is recursion?\nAssistant:"
+# Ollama: write a Modelfile with `FROM ./exports/orbit-micro.gguf`, then `ollama create orbit`
+# Python (llama-cpp-python)
+llm = Llama(model_path="exports/orbit-micro.gguf", n_ctx=384)
+```
+
+Both the `q8_0` and the `f32` file were load-tested with llama-cpp-python
+(0.3.35) — `User: What is recursion?` answers *"Recursion is when a function
+solves a problem by calling itself on smaller inputs. It needs a base case that
+stops the calls."* The vocabulary is byte-level BPE with two control tokens
+(`<|pad|>`, `<|endoftext|>`), the 256 byte tokens and the learned merges, and
+over a battery of prompts llama.cpp's tokeniser returns **identical** ids to
+`orbit_gpt/tokenizer.py`. The one known difference: llama.cpp's regular
+expression folds the last space of a run of two or more into the next word
+(`"hello   world"` → 6 tokens instead of 8), so prompts written with multiple
+consecutive spaces can drift. Single spaces, tabs, newlines, digits,
+punctuation and non-Latin text all match byte for byte.
+
+---
+
+## ⚙️ Why it is cheap to train
+
+The pipeline only spends time on work that changes the model:
+
+| what | effect |
+|------|--------|
+| **tokenizer + token cache** | the 7 MB corpus is tokenised once; later runs load `tokens.npy` instead of re-doing it (~10 s saved per run) |
+| **right-sized vocabulary** | `nano` uses 1024 tokens instead of 2048 — the output matrix is a third of a 0.8 M model, so every step is cheaper |
+| **trimmed corpora** | 48 k exchanges instead of 74 k: the same coverage, less work per epoch |
+| **epoch cap** | `--max-epochs 8` stops when the data is saturated instead of grinding on |
+| **two-stage SFT** | prose first (sentence shape) then chat (format); the second stage converges in far fewer steps than learning both at once |
+| **train once, chat many** | every later run loads the checkpoint — no retraining |
+| **ONNX int8 + KV cache** | ~5 MB model, one small forward pass per generated token |
+
+Measured on a **2-core laptop CPU** (no GPU):
+
+| preset | tokens/step | ms/step | 1000 steps |
+|--------|-------------|---------|------------|
+| nano   | 1,024  | 150 ms   | 2.5 min |
+| micro  | 2,048  | 1,250 ms | 21 min |
+
+A free Colab **T4** is roughly 10x that, which is why the default 2,000-step
+`micro` run finishes in a few minutes there.
+
+---
+
+---
+
 ## 📏 Model sizes
 
 | preset | layers | heads | width | context | params | trains in |
@@ -189,7 +313,8 @@ Useful flags: `--tokenizer char` (baseline), `--vocab-size`,
 
 | name | what it is |
 |------|------------|
-| `conversation` | **default** — ~28,000 generated `User:` / `Assistant:` exchanges (3.2 MB) built on the fly, no download |
+| `conversation` | **SFT stage 2** — ~48,000 generated `User:` / `Assistant:` exchanges (7 MB) built on the fly, no download |
+| `prose` | **SFT stage 1** — 3.6 MB of plain paragraphs built from the same knowledge, no download |
 | `shakespeare` | ~1.1 MB of Shakespeare (the classic nanoGPT corpus) |
 | `orbit-chat`  | 137 short `User:` / `Assistant:` exchanges built into the repo |
 | `alice`, `pride`, `shakespeare-sonnets` | Project Gutenberg books |
@@ -207,7 +332,8 @@ Which corpus should you use?
 
 | goal | corpus | what to expect |
 |------|--------|----------------|
-| best chat answers | `conversation` (default) | answers phrasings it never saw during training |
+| best chat answers | `prose` → `conversation` (the default two-stage run) | real sentences first, then the chat format |
+| chat only | `conversation` | faster to train, weaker sentences |
 | writer *and* chat | `shakespeare,conversation` | funnier, less accurate |
 | best prose | `shakespeare` or a big book | fluent-ish pastiche, no chat ability |
 | your own data | `./notes.txt,conversation` | your text, still able to chat |
@@ -391,21 +517,27 @@ orbit-gpt/
 │   ├── data.py        # corpora, downloading, train/val split, batching
 │   ├── train.py       # AdamW + cosine schedule + AMP + checkpointing
 │   ├── generate.py    # sampling, stop strings, chat REPL
+│   ├── export.py      # ONNX export (+ 8-bit quantisation) for the local app
 │   ├── skills.py      # deterministic arithmetic / unit conversions
 │   ├── search.py      # optional web search (pluggable provider)
 │   ├── checkpoints.py # where checkpoints live + resume resolution
 │   └── corpora/
-│       ├── conversation.py         # the generated dialogue corpus (default)
+│       ├── conversation.py         # the generated dialogue corpus (SFT stage 2)
+│       ├── prose.py                # the generated prose corpus (SFT stage 1)
 │       └── orbit_assistant.txt     # small hand-written exchange corpus
-├── train.py           # CLI: train a model
+├── train.py           # CLI: train a model (--init-from = fine-tune)
 ├── generate.py        # CLI: sample / chat
+├── orbit_app.py       # desktop/terminal chat app: ONNX + onnxruntime only
 ├── colab/
 │   ├── orbit_gpt_colab.py         # self-contained single file for Colab
-│   └── OrbitGPT_Colab.ipynb       # ready-made notebook
+│   ├── OrbitGPT_Colab.ipynb       # ready-made notebook
+│   └── OrbitGPT_2_Cells.ipynb     # the two-cell quickstart
 ├── checkpoints/                   # gitignored: model.pt, model-latest.pt, ...
+├── exports/                       # gitignored: the ONNX app bundle
 ├── tools/build_colab.py           # regenerates the single file from the package
+├── tools/export_gguf.py           # GGUF export for llama.cpp / Ollama / LM Studio
 ├── tools/colab_footer.py          #   ...the Colab entry point it appends
-└── tests/                         # 52 fast tests, no pytest needed
+└── tests/                         # 61 fast tests, no pytest needed
 ```
 
 `colab/orbit_gpt_colab.py` is **generated** from the package by
