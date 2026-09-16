@@ -114,7 +114,10 @@ _KEEP_F32 = ("token_embd", "position_embd", "output_norm", "attn_norm", "ffn_nor
 
 def _quantized(name: str, array: np.ndarray, quant: str, gguf_module) -> tuple:
     """Return ``(data, ggml_type)`` for one tensor."""
-    if quant == "f32" or any(keep in name for keep in _KEEP_F32):
+    # 1-D tensors (norms and biases) stay in f32: llama.cpp's CPU kernels add
+    # them straight onto activations, which only works for f32/f16 operands
+    if (quant == "f32" or array.ndim == 1
+            or any(keep in name for keep in _KEEP_F32)):
         return array.astype(np.float32), gguf_module.GGMLQuantizationType.F32
     if quant == "f16":
         return array.astype(np.float16), gguf_module.GGMLQuantizationType.F16
@@ -127,7 +130,7 @@ def _quantized(name: str, array: np.ndarray, quant: str, gguf_module) -> tuple:
 
 
 def export_gguf(checkpoint, out_path, quant: str = "q8_0", check: bool = False,
-                verbose: bool = True) -> Path:
+                verbose: bool = True, pre_type: str = "gpt-2") -> Path:
     """Write ``checkpoint`` (a file or directory) to ``out_path`` as GGUF."""
     import gguf
 
@@ -167,12 +170,16 @@ def export_gguf(checkpoint, out_path, quant: str = "q8_0", check: bool = False,
             tokens.append(tokenizer.special_tokens[i])
             types.append(gguf.TokenType.CONTROL)
         else:
+            # every piece is a normal token: llama.cpp's BYTE type is only for
+            # SPM-style "<0xAB>" fallbacks, and the GPT-2 byte alphabet (\u0120
+            # for a space, and so on) is what a "gpt2" vocabulary carries
             tokens.append(gguf_token(tokenizer.pieces[i]))
-            types.append(gguf.TokenType.BYTE if i < tokenizer.byte_offset + 256
-                         else gguf.TokenType.NORMAL)
+            types.append(gguf.TokenType.NORMAL)
     merges = [f"{tokens[a]} {tokens[b]}" for a, b in tokenizer.merges]
     writer.add_tokenizer_model("gpt2")
-    writer.add_tokenizer_pre("gpt2")
+    # llama.cpp registers the GPT-2 pre-tokeniser as "gpt-2" (older builds
+    # reject other spellings), so that is what a converted GPT-2 model carries
+    writer.add_tokenizer_pre(pre_type)
     writer.add_token_list(tokens)
     writer.add_token_types(types)
     writer.add_token_merges(merges)
@@ -183,9 +190,30 @@ def export_gguf(checkpoint, out_path, quant: str = "q8_0", check: bool = False,
     writer.add_add_eos_token(False)
 
     # -- tensors -----------------------------------------------------------
+    by_gguf = {gguf_name: source
+               for source, gguf_name in gguf_tensor_names(state).items()}
+    # llama.cpp's gpt2 loader asks for the LayerNorm and attention/MLP biases by
+    # name (it follows the GPT-2 reference implementation, which has them), so
+    # supply zeros for the ones this model does not have: adding zero is exact.
+    for layer in range(n_layer):
+        for missing in (
+            f"blk.{layer}.attn_norm.bias", f"blk.{layer}.attn_qkv.bias",
+            f"blk.{layer}.attn_output.bias", f"blk.{layer}.ffn_norm.bias",
+            f"blk.{layer}.ffn_up.bias", f"blk.{layer}.ffn_down.bias",
+        ):
+            by_gguf.setdefault(missing, None)
+    by_gguf.setdefault("output_norm.bias", None)
+
     written = 0
-    for name, gguf_name in sorted(gguf_tensor_names(state).items()):
-        tensor = state[name].detach().cpu().float().numpy()
+    for gguf_name, source in sorted(by_gguf.items()):
+        if source is None:
+            suffix = ".".join(gguf_name.split(".")[-2:])
+            width = {"attn_qkv.bias": 3 * n_embd, "ffn_up.bias": n_ff}.get(
+                suffix, n_embd
+            )
+            tensor = np.zeros(width, dtype=np.float32)
+        else:
+            tensor = state[source].detach().cpu().float().numpy()
         data, ggml_type = _quantized(gguf_name, tensor, quant, gguf)
         writer.add_tensor(gguf_name, data, raw_dtype=ggml_type)
         written += 1
@@ -292,12 +320,17 @@ def verify_gguf(path, checkpoint, prompt: str = "User: Hello!\nAssistant:",
 
     worst = 0.0
     for ours, name in mapping.items():
+        if name not in stored:      # a zero-bias filler llama.cpp asked for
+            continue
         reference = state[ours]
         if reference.ndim == 2 and stored[name].shape != reference.shape:
             raise AssertionError(f"{name}: shape {stored[name].shape} != {reference.shape}")
         worst = max(worst, float(np.abs(stored[name] - reference).max()))
+    zeros = [n for n, v in stored.items()
+             if n.endswith(".bias") and not np.any(v)]
     if verbose:
-        print(f"  tensors: {len(mapping)} compared, worst |gguf - torch| = {worst:.2e}")
+        print(f"  tensors: {len(mapping)} compared, worst |gguf - torch| = {worst:.2e}"
+              + (f" (+{len(zeros)} zero biases llama.cpp asks for)" if zeros else ""))
 
     # -- logits from the file itself --------------------------------------
     tokenizer = load_tokenizer(_tokenizer_dir(checkpoint))
@@ -329,12 +362,16 @@ def main(argv=None) -> int:
                         help="checkpoint file or directory")
     parser.add_argument("--out", default="exports/orbit-micro.gguf")
     parser.add_argument("--quantize", choices=sorted(QUANT_TYPES), default="q8_0")
+    parser.add_argument("--pre-type", default="gpt-2",
+                        help="tokenizer.ggml.pre value (llama.cpp's GPT-2 "
+                             "pre-tokeniser is called 'gpt-2')")
     parser.add_argument("--check", action="store_true",
                         help="read the file back and verify it against PyTorch")
     args = parser.parse_args(argv)
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    export_gguf(args.checkpoint, args.out, quant=args.quantize, check=args.check)
+    export_gguf(args.checkpoint, args.out, quant=args.quantize, check=args.check,
+                pre_type=args.pre_type)
 
     if args.check:
         tokenizer = load_tokenizer(_tokenizer_dir(args.checkpoint))

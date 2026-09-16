@@ -205,29 +205,44 @@ python tools/export_gguf.py checkpoints/orbit --out exports/orbit-micro.gguf --q
 ```
 
 ```text
-wrote exports/orbit-micro.gguf (7.6 MB, q8_0, 39 tensors, 2048 tokens, 1790 merges)
-  tensors: 39 compared, worst |gguf - torch| = 8.31e-04
+wrote exports/orbit-micro.gguf (7.7 MB, q8_0, 76 tensors, 2048 tokens, 1790 merges)
+  tensors: 39 compared, worst |gguf - torch| = 8.31e-04 (+37 zero biases llama.cpp asks for)
   logits : 14 tokens, max |numpy(gguf) - torch| = 3.03e-02 | top-1: torch 442, gguf 442 (same)
   vocab  : 2048 tokens (2 special + 256 bytes + 1790 merges)
 ```
 
 `--quantize f32|f16|q8_0|q4_0` picks the precision; the embeddings, the
-LayerNorms and the position embeddings always stay at full precision, because
-quantising those costs far more quality than it saves space. `--check` reads the
-file back, compares every tensor against PyTorch and then runs a forward pass
-built *only from the GGUF data*, so a transposed matrix cannot slip through.
+LayerNorms, the position embeddings and every 1-D tensor (biases) always stay at
+full precision, because quantising those costs far more quality than it saves
+space — and llama.cpp's CPU kernels add biases onto f32 activations directly.
+`--check` reads the file back, compares every tensor against PyTorch and then
+runs a forward pass built *only from the GGUF data*, so a transposed matrix
+cannot slip through.
+
+llama.cpp's `gpt2` loader asks for the LayerNorm and attention/MLP biases that
+the GPT-2 reference implementation has and this model does not, so the export
+writes them as zeros — adding zero is exact, and it is what makes the file load
+instead of failing with `tensor 'output_norm.bias' not found`.
 
 ```bash
 # llama.cpp
 ./llama-cli -m exports/orbit-micro.gguf -p "User: What is recursion?\nAssistant:"
 # Ollama: write a Modelfile with `FROM ./exports/orbit-micro.gguf`, then `ollama create orbit`
+# Python (llama-cpp-python)
+llm = Llama(model_path="exports/orbit-micro.gguf", n_ctx=384)
 ```
 
-The vocabulary is byte-level BPE with two control tokens (`<|pad|>`,
-`<|endoftext|>`), the 256 byte tokens and the learned merges. llama.cpp's own
-`gpt2` pre-tokeniser splits words slightly differently from this project's (its
-regex vs `orbit_gpt/tokenizer.py`), so for byte-exact prompt ids use
-`python generate.py`, or the ONNX export above.
+Both the `q8_0` and the `f32` file were load-tested with llama-cpp-python
+(0.3.35) — `User: What is recursion?` answers *"Recursion is when a function
+solves a problem by calling itself on smaller inputs. It needs a base case that
+stops the calls."* The vocabulary is byte-level BPE with two control tokens
+(`<|pad|>`, `<|endoftext|>`), the 256 byte tokens and the learned merges, and
+over a battery of prompts llama.cpp's tokeniser returns **identical** ids to
+`orbit_gpt/tokenizer.py`. The one known difference: llama.cpp's regular
+expression folds the last space of a run of two or more into the next word
+(`"hello   world"` → 6 tokens instead of 8), so prompts written with multiple
+consecutive spaces can drift. Single spaces, tabs, newlines, digits,
+punctuation and non-Latin text all match byte for byte.
 
 ---
 

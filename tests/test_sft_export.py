@@ -209,9 +209,16 @@ def test_gguf_export_matches_pytorch():
         names = gguf_tensor_names(state)
         assert "token_embd.weight" in names.values()
         assert "blk.1.attn_qkv.weight" in names.values()
-        assert len(stored) == len(names)
         for ours, name in names.items():
             assert stored[name].shape == tuple(state[ours].shape), name
+        # plus the zero biases llama.cpp's gpt2 loader asks for
+        extra = set(stored) - set(names.values())
+        assert extra == {*("blk.%d.%s.bias" % (i, part)
+                           for i in range(config.n_layer)
+                           for part in ("attn_norm", "attn_qkv", "attn_output",
+                                        "ffn_norm", "ffn_up", "ffn_down")),
+                         "output_norm.bias"}
+        assert all(np.abs(stored[name]).max() == 0.0 for name in extra)
 
         # the GGUF data alone reproduces the logits
         ids = [5, 6, 7, 8, 9, 10]
